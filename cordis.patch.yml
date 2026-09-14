@@ -1,0 +1,14 @@
+# Host runtime and Feishu bot; both entries are needed in the web profile.
+- insert:
+    - id: webhook-runtime
+      name: '@deepseek-ai/dsh-webhook'
+    - id: feishu-bot
+      name: '@icanotcode/dsh-feishu-bot'
+      config:
+        source: primary-feishu
+        path: /webhook/feishu
+        appIdEnv: FEISHU_APP_ID
+        appSecretEnv: FEISHU_APP_SECRET
+        workspacePath: !!js process.cwd()
+        agentPreset: standard
+        permissionPreset: workspace-write

@@ -1,0 +1,61 @@
+{
+  "name": "@icanotcode/dsh-feishu-bot",
+  "description": "飞书机器人：在 DeepSeek Harness 中配置飞书、接收消息并回复 Agent 结果",
+  "version": "0.1.2",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": "./client/index.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings-plugins"
+      ],
+      "platform": "web"
+    }
+  },
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-credentials": "^0.1.5-rc.2",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.5-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.1.5-rc.2",
+    "@deepseek-ai/dsh-webhook": "^0.1.5-rc.2"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-util-values": "^0.1.5-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.2",
+    "@larksuiteoapi/node-sdk": "1.74.0",
+    "js-yaml": "^4.1.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "install:harness": "node scripts/install.mjs",
+    "start:harness": "node scripts/start.mjs",
+    "start:ngrok": "node scripts/start-ngrok.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/icanotcode/dsh-feishu-bot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/icanotcode/dsh-feishu-bot/issues"
+  },
+  "homepage": "https://github.com/icanotcode/dsh-feishu-bot#readme",
+  "files": [
+    "lib/",
+    "client/",
+    "scripts/",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  }
+}
