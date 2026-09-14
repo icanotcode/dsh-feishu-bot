@@ -22,6 +22,12 @@ Feishu text message → Webhook / WebSocket → Harness Agent → Reply to the o
 
 This is an independently maintained community plugin, unaffiliated with DeepSeek or Feishu. The current version is **0.1.2**. Install it from this repository; it has not been published to npm.
 
+## Settings preview
+
+![Feishu plugin settings](assets/settings-webhook.png)
+
+Actual settings UI captured in an isolated demo environment with no application credentials configured.
+
 ## Current capabilities
 
 | Capability | Current behavior |
