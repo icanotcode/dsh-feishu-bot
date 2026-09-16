@@ -35,6 +35,7 @@ export async function createConversationFixture(t, options = {}) {
     },
     tools: { register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name); } },
     webhookRuntime: { register(value) { rule = value; return async () => {}; } },
+    ...options.context,
   };
   const client = {
     withSignal: (_signal, run) => run(),
@@ -104,14 +105,14 @@ export async function createConversationFixture(t, options = {}) {
     fixture.host = options.host ?? makeHost();
     fixture.agents = fixture.host.agents;
     fixture.dispose = await installFeishuRuntime(ctx, config, client, options.tools ?? [], options.executeTool ?? (async () => null), {
-      history: fixture.history, host: fixture.host, now: () => clock,
+      history: fixture.history, host: fixture.host, now: () => clock, mediaApi: options.mediaApi,
     });
   }
-  fixture.send = async ({ text = 'hello', senderId = 'alice', chatId = 'chat-a', messageId, deliveryId, tenantId = 'tenant', timestamp, signal } = {}) => {
+  fixture.send = async ({ text = 'hello', senderId = 'alice', chatId = 'chat-a', messageId, deliveryId, tenantId = 'tenant', timestamp, signal, attachments, attachmentError, msgType } = {}) => {
     messageId ??= `message-${++sequence}`;
     deliveryId ??= `delivery-${messageId}`;
     await rule.run({ kind: 'feishu', source: config.source, deliveryId, receivedAt: clock,
-      event: { payload: { parsed: { userText: text, senderId, chatId, messageId, tenantId, ...(timestamp ? { timestamp } : {}) } } },
+      event: { payload: { parsed: { userText: text, senderId, chatId, messageId, tenantId, ...(timestamp ? { timestamp } : {}), ...(attachments ? { attachments } : {}), ...(attachmentError ? { attachmentError } : {}), ...(msgType ? { msgType } : {}) } } },
     }, signal ?? new AbortController().signal);
     return { messageId, deliveryId };
   };

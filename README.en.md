@@ -1,6 +1,6 @@
 # DeepSeek Harness Feishu Bot
 
-**Start tasks in your local Harness from Feishu and receive text replies to the original message.**
+**Start tasks in your local Harness from Feishu and receive replies and files on the original message.**
 
 [![Tests](https://github.com/icanotcode/dsh-feishu-bot/actions/workflows/test.yml/badge.svg)](https://github.com/icanotcode/dsh-feishu-bot/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -17,7 +17,7 @@ English · [简体中文](README.md)
 The plugin supports two connection modes: **developer server (HTTP Webhook)** and **persistent connection (WebSocket)**. Use Webhook if you have a public endpoint, ngrok, or Cloudflare Tunnel; choose WebSocket if you run Harness locally without a public endpoint. Saving the configuration applies the selected mode.
 
 ```text
-Feishu text message → Webhook / WebSocket → Harness Agent → Reply to the original Feishu message
+Feishu text / rich text / attachments → Webhook / WebSocket → Harness Agent → Replies and files
 ```
 
 This is an independently maintained community plugin, unaffiliated with DeepSeek or Feishu. The current version is **0.2.0**. Install it from this repository; it has not been published to npm.
@@ -34,7 +34,8 @@ Actual settings UI captured in an isolated demo environment with no application 
 | --- | --- |
 | Plugin list entry | Expand the `feishu-bot` card in Plugin list to configure the plugin directly |
 | Two event transports | Choose Webhook or WebSocket; saving updates the runtime configuration |
-| Text message handling | Receives `im.message.receive_v1`; reuses the current session for the same tenant, user, and chat |
+| Messages and attachments | Receives text, rich text (`post`), images, files, video, and audio through `im.message.receive_v1`; reuses the current session for the same tenant, user, and chat |
+| File replies and image reading | Sends files or media from the user workspace to the current message; models declaring image input can inspect older images |
 | Working indicator | Adds a `Typing` reaction to the original message when processing starts and attempts to remove it when processing ends; reaction failures do not block the task or reply |
 | Automatic replies | Replies to the original message with the Agent's final text; splits long replies into multiple messages |
 | Webhook verification | Handles URL verification, Verification Token checks, encrypted payload decryption, and signature verification |
@@ -46,7 +47,7 @@ Actual settings UI captured in an isolated demo environment with no application 
 | History | Timestamped records; Agent tools can search, read, add notes, update, and soft-delete records belonging to the current user and chat |
 | Daily reset | Starts a fresh context at 04:00 Asia/Macau by default; waits for running work to finish and retains history |
 
-**Remote Feishu sessions only receive restricted workspace-file and personal-history tools.** Arbitrary shell execution, general MCP tools, and Feishu APIs that could access other users’ data are not exposed. Workspace-write only applies to the user’s own directory; read-only forbids workspace file changes. New users inherit the global permission preset. Existing per-user permission overrides from older configurations are retained. The local Harness administrator retains control of the host and stored data.
+**Remote Feishu sessions only receive restricted workspace-file, personal-history, and current-message attachment tools.** Arbitrary shell execution, general MCP tools, and Feishu APIs that could access other users’ data are not exposed. Workspace-write only applies to the user’s own directory; read-only forbids workspace file changes. New users inherit the global permission preset. Existing per-user permission overrides from older configurations are retained. The local Harness administrator retains control of the host and stored data.
 
 ### Examples
 
@@ -59,6 +60,26 @@ Or add the bot to a group and @mention it:
 > Update the proposal in my working directory using the requirements we discussed earlier.
 
 A corresponding session appears in Harness, and the plugin sends the final text reply when processing finishes. These are natural-language request examples; the result depends on the model, Agent preset, working directory, and permissions. Follow-up messages in the same chat reuse context. `/new` routes subsequent messages into a new session; it does not cancel running work. New work waits for the old task to finish.
+
+### Files, images, video, and audio
+
+After confirming your name, send files, images, video, audio, or Feishu rich-text (`post`) messages containing images. Resources are saved under `incoming/...` in your own workspace. History records retain the original filename, receipt time, and relative path so you can search by name or date later. `/new` and daily context resets do not delete these files. Before name confirmation, the plugin only asks for your name and does not download attachments; resend them after confirming.
+
+| Operation | Plugin limit |
+| --- | --- |
+| Incoming resources | Up to 10 resources and 100 MiB total per message |
+| Outgoing images | Up to 10 MiB each |
+| Outgoing files, video, and audio | Up to 30 MiB each |
+| Video messages | MP4 only; send other formats as ordinary files |
+| Audio messages | OPUS only; send other formats as ordinary files |
+
+For example, ask the Agent to turn a CSV into a Markdown table and send it back. With `workspace-write` permission, the restricted `workspace_write` tool can create TXT, Markdown, or CSV files, then `feishu_send_file` uploads the result and replies to the current Feishu message. A path printed in a text reply does not send a file.
+
+The sending tool takes `feishu_send_file(path, kind, coverPath?, duration?)`: `path` is relative to the current user's workspace; `kind` is `file` (default), `image`, `video`, or `audio`; `coverPath` is a workspace-relative video cover image; `duration` is in milliseconds. There is no recipient argument. Sending is only available while processing the currently claimed Feishu message, not from an idle Harness session or to an arbitrary recipient.
+
+Image understanding uses the model already configured in Harness, and only when that model explicitly declares image input. `feishu_read_image` can inspect older images in the user's workspace. Text-only models can save, find, and send image files but cannot view them. Media transfer does not add automatic video analysis, transcription, OCR, conversion, general PDF/Office parsing, or arbitrary shell access. This is a plugin update: no Harness core modification, extra model, or additional settings navigation is required.
+
+Enable the corresponding API permissions and publish the app as described in the [attachment permissions guide (Chinese)](docs/setup.md#附件权限).
 
 ## Quick start
 
@@ -168,7 +189,7 @@ Ask the Agent to find an older discussion, add a project note, or correct a reco
 
 ## Support boundaries and verification status
 
-The chat entry point currently supports text messages and final text replies. It does not yet support image/file input or streaming output. History is persisted, but it is not a reliable delivery queue; restarting during a task does not guarantee recovery of undelivered replies.
+The chat entry point supports text, rich text, and image/file/video/audio input, final text replies, and file replies to the current message. Streaming output is not supported. History is persisted, but it is not a reliable delivery queue; restarting during a task does not guarantee recovery of undelivered replies.
 
 Apart from `im.message.receive_v1`, the plugin does not handle bot join/leave events, message read/recall events, user reaction events, cloud document comments, or meeting/notes/minutes events. **`card.action.trigger` card button callbacks** and general scheduled task execution are also not implemented. Daily context reset is not an arbitrary cron scheduler. There is no need to subscribe to these extra events for this plugin. Adding/removing the `Typing` indicator does not require a reaction event subscription; it requires `im:message.reactions:write_only`. Publish/activate the updated app permissions in Feishu before testing. See the setup guide.
 
