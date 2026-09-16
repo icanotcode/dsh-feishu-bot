@@ -95,6 +95,10 @@ export async function createConversationFixture(t, options = {}) {
   }
   async function start() {
     fixture.history = await createHistoryStore({ root: config.historyRoot });
+    for (const [openId, displayName] of options.profiles ?? [['alice', 'Alice'], ['bob', 'Bob']]) {
+      const store = fixture.history.forUser({ source: config.source, tenantId: 'tenant', openId });
+      if (!store.getProfile()) store.confirmProfile(displayName);
+    }
     fixture.host = options.host ?? makeHost();
     fixture.agents = fixture.host.agents;
     fixture.dispose = await installFeishuRuntime(ctx, config, client, options.tools ?? [], options.executeTool ?? (async () => null), {

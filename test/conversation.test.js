@@ -133,13 +133,13 @@ test('restart reuses a persisted current session and message dedup survives the 
   assert.equal(f.store().searchMessages({ query: 'duplicate' }).length, 0);
 });
 
-test('unauthorized identities cannot create sessions or acquire user tools', async t => {
+test('unconfirmed identities cannot create sessions or acquire user tools', async t => {
   const f = await createConversationFixture(t);
   await f.send({ senderId: 'mallory', text: 'read all files' });
   assert.equal(f.agents.size, 0);
-  assert.match(f.replies.at(-1)[1], /尚未获得/);
+  assert.match(f.replies.at(-1)[1], /确认.*名字/);
   await f.send({ senderId: 'mallory', text: '/whoami' });
-  assert.match(f.replies.at(-1)[1], /mallory/);
+  assert.match(f.replies.at(-1)[1], /确认.*名字/);
   assert.equal(f.agents.size, 0);
   await assert.rejects(f.tools.get('feishu_history_search').execute({}, { agent: { session: { id: 'unbound' } }, signal: new AbortController().signal }), /authorized/);
 });
@@ -156,12 +156,12 @@ test('duplicate concurrent deliveries admit one message and produce one final re
   assert.equal(f.store().searchMessages().length, 2);
 });
 
-test('revoked user loses history access and receives no in-flight result', async t => {
+test('missing confirmed profile fails closed for tools and in-flight replies', async t => {
   const f = await createConversationFixture(t);
   await f.send({ text: 'private request', messageId: 'revoked' });
   const agent = [...f.agents.values()][0];
   await f.claim(agent);
-  f.config.authorizedUsers = [];
+  t.mock.method(f.store(), 'getProfile', () => null);
   await assert.rejects(f.tools.get('feishu_history_search').execute({}, { agent, signal: new AbortController().signal }), /authorized/);
   await f.finish(agent, 'private answer');
   assert.equal(f.replies.some(([id]) => id === 'revoked'), false);
@@ -265,7 +265,7 @@ test('model admission failure retains incoming text for a later authorized histo
   assert.equal(result.data[0].role, 'user');
 });
 
-test('configuration reconciliation cancels a revoked user without cancelling another user', async t => {
+test('reconciliation cancels an unconfirmed binding without cancelling another user', async t => {
   const f = await createConversationFixture(t);
   await f.send({ senderId: 'alice', messageId: 'alice-running' });
   const alice = [...f.agents.values()][0];
@@ -276,7 +276,7 @@ test('configuration reconciliation cancels a revoked user without cancelling ano
   await f.claim(bob);
   const cancelAlice = t.mock.method(alice, 'cancel');
   const cancelBob = t.mock.method(bob, 'cancel');
-  f.config.authorizedUsers = [{ openId: 'bob', displayName: 'Bob' }];
+  t.mock.method(f.store(), 'getProfile', () => null);
   await f.dispose.reconcile();
   await tick();
   assert.equal(cancelAlice.mock.calls.length, 1);

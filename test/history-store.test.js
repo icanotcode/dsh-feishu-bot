@@ -16,6 +16,71 @@ function session(user, sessionId = 'session-1', chatId = 'private') {
   return user.ensureSession({ sessionId, chatId, dayKey: '2026-09-16' });
 }
 
+test('confirmed user profiles persist independently of sessions and message CRUD', async t => {
+  const { root, manager, user } = await fixture(t);
+  assert.equal(user.getProfile(), null);
+  const confirmed = user.confirmProfile('  Alex 陈  ');
+  assert.equal(confirmed.displayName, 'Alex 陈');
+  assert.equal(confirmed.confirmedAt, confirmed.updatedAt);
+  assert.equal(new Date(confirmed.confirmedAt).toISOString(), confirmed.confirmedAt);
+  assert.deepEqual(user.getProfile(), confirmed);
+  session(user);
+  const message = user.appendMessage({ sessionId: 'session-1', role: 'note', text: 'displayName: Someone else' });
+  user.updateMessage(message.id, { text: 'confirmedAt: unconfirmed' });
+  user.deleteMessage(message.id);
+  user.closeSession('session-1', { reason: 'daily' });
+  assert.deepEqual(user.getProfile(), confirmed, 'history CRUD and context rotation do not affect confirmation');
+  manager.close();
+  const reopened = await createHistoryStore({ root }); t.after(() => reopened.close());
+  const restored = reopened.forUser(identity);
+  assert.deepEqual(restored.getProfile(), confirmed);
+  const updated = restored.confirmProfile('Alex');
+  assert.equal(updated.displayName, 'Alex');
+  assert.equal(updated.confirmedAt, confirmed.confirmedAt);
+  assert.ok(updated.updatedAt >= confirmed.updatedAt);
+  reopened.close();
+});
+
+test('profile confirmation is isolated by trusted user, tenant and source identity', async t => {
+  const { manager, user } = await fixture(t);
+  const confirmed = user.confirmProfile('Alex');
+  for (const otherIdentity of [{ ...identity, openId: 'bob' }, { ...identity, tenantId: 'other' }, { ...identity, source: 'other' }]) {
+    const other = manager.forUser(otherIdentity);
+    assert.equal(other.getProfile(), null);
+    other.confirmProfile('Alex');
+    other.confirmProfile('Other name');
+    assert.deepEqual(user.getProfile(), confirmed, 'matching display names do not merge identities');
+  }
+});
+
+test('profile confirmation validates names without altering the previous confirmed profile', async t => {
+  const { user } = await fixture(t);
+  const confirmed = user.confirmProfile('😀'.repeat(100));
+  for (const invalid of [undefined, null, 123, '', '   ', 'a'.repeat(101), '😀'.repeat(101), 'Alex\nOther', '\tAlex', 'Alex\r', 'A\0B', 'A\u0085B', 'A\u2028B', 'A\u2029B']) {
+    assert.throws(() => user.confirmProfile(invalid), /displayName/);
+    assert.deepEqual(user.getProfile(), confirmed);
+  }
+  const sql = "'; DROP TABLE user_profile; --";
+  assert.equal(user.confirmProfile(sql).displayName, sql);
+  assert.equal(user.getProfile().displayName, sql);
+});
+
+test('existing history databases gain an unconfirmed profile without losing old messages', async t => {
+  const { root, manager, user } = await fixture(t);
+  session(user);
+  const message = user.appendMessage({ sessionId: 'session-1', role: 'user', text: 'I am Alex' });
+  manager.close();
+  const { DatabaseSync } = await import('node:sqlite');
+  const database = new DatabaseSync(path.join(root, userKey(identity), 'history.sqlite'));
+  try { database.exec('DROP TABLE user_profile'); } finally { database.close(); }
+  const reopened = await createHistoryStore({ root }); t.after(() => reopened.close());
+  const restored = reopened.forUser(identity);
+  assert.equal(restored.getProfile(), null, 'old history does not count as explicit name confirmation');
+  assert.equal(restored.getMessage(message.id).text, 'I am Alex');
+  assert.equal(restored.confirmProfile('Alex').displayName, 'Alex');
+  reopened.close();
+});
+
 test('history session bindings and delivery/message dedup survive process reopen', async t => {
   const { root, manager, user } = await fixture(t);
   session(user); user.setCurrentSession('private', 'session-1');
@@ -196,6 +261,8 @@ test('cached databases reject newly linked journals and substituted directory an
   const unrelated = path.join(root, 'unrelated'); writeFileSync(unrelated, 'private');
   linkSync(unrelated, journal);
   assert.throws(() => user.searchMessages(), /hard links/);
+  assert.throws(() => user.getProfile(), /hard links/);
+  assert.throws(() => user.confirmProfile('Alex'), /hard links/);
   rmSync(journal);
   assert.deepEqual(user.searchMessages(), []);
   const relocated = userDirectory + '-moved';
@@ -211,4 +278,6 @@ test('cached databases reject newly linked journals and substituted directory an
   symlinkSync(relocated, userDirectory, process.platform === 'win32' ? 'junction' : 'dir');
   assert.throws(() => user.searchMessages(), /symbolic links/);
   assert.throws(() => user.appendMessage({ sessionId: 'session-1', role: 'note', text: 'no' }), /symbolic links/);
+  assert.throws(() => user.getProfile(), /symbolic links/);
+  assert.throws(() => user.confirmProfile('Alex'), /symbolic links/);
 });

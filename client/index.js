@@ -51,7 +51,7 @@ window.__ModuleLoader__.load({
       connectionMode: 'webhook', appId: '', appSecret: '', verificationToken: '', encryptKey: '',
       workspacePath: '', agentPreset: 'standard', permissionPreset: 'workspace-write',
       tunnelProvider: 'ngrok', ngrokAuthtoken: '', ngrokDomain: '', publicBaseUrl: '',
-      authorizedUsers: [], dailyResetHour: 4, dailyResetTimezone: 'Asia/Macau'
+      dailyResetHour: 4, dailyResetTimezone: 'Asia/Macau'
     };
     const secrets = ['appSecret', 'verificationToken', 'encryptKey', 'ngrokAuthtoken'];
 
@@ -90,14 +90,12 @@ window.__ModuleLoader__.load({
       const [reload, setReload] = useState(0);
       const [connected, setConnected] = useState(false);
       const [secretFlags, setSecretFlags] = useState({});
-      const [authorizedUsersText, setAuthorizedUsersText] = useState('');
 
       function applyConfig(data) {
         const value = data.config || data;
         const safe = { ...defaults, ...value };
         secrets.forEach(key => { safe[key] = ''; });
         setConfig(safe);
-        setAuthorizedUsersText(safe.authorizedUsers.map(user => `${user.openId} ${user.displayName}`).join('\n'));
         setSavedMode(safe.connectionMode);
         setSavedProvider(safe.tunnelProvider);
         setSecretFlags(data.configured || data.secrets || value.configured || {});
@@ -151,16 +149,10 @@ window.__ModuleLoader__.load({
       }, [reload]);
 
       function payload() {
-        const authorizedUsers = authorizedUsersText.split(/\r?\n/).filter(line => line.trim()).map((line, index) => {
-          const match = line.trim().match(/^(\S+)\s+(.+)$/);
-          if (!match) throw new Error(`授权用户第 ${index + 1} 行需要填写 open_id 和显示名称，用空格分隔。`);
-          const permissionPreset = config.authorizedUsers.find(user => user.openId === match[1])?.permissionPreset;
-          return { openId: match[1], displayName: match[2].trim(), ...(permissionPreset ? { permissionPreset } : {}) };
-        });
         // Omit empty secret fields: the server retains previously saved credentials.
         return Object.fromEntries(Object.keys(defaults)
           .filter(key => !secrets.includes(key) || config[key])
-          .map(key => [key, key === 'authorizedUsers' ? authorizedUsers : config[key]]));
+          .map(key => [key, config[key]]));
       }
       async function run(action, task) {
         setBusy(action);
@@ -257,34 +249,10 @@ window.__ModuleLoader__.load({
                 ] }),
                 h('p', { className: 'feishu-muted' }, '飞书会话仅使用本用户的历史记录工具和受限工作区文件工具，不提供任意主机 Shell 或通用文件访问。只读模式禁止修改工作区文件。')),
               h('section', null,
-                h('h3', null, '用户授权与会话'),
-                h('div', { className: 'feishu-field' },
-                  h('label', { htmlFor: `${prefix}-authorizedUsers` }, '授权用户（每行 open_id 显示名称）'),
-                  h('textarea', { id: `${prefix}-authorizedUsers`, rows: 5, value: authorizedUsersText,
-                    placeholder: 'ou_example 张三\nou_another 李四', disabled: Boolean(busy), spellCheck: false,
-                    onChange: event => {
-                      const value = event.target.value;
-                      setAuthorizedUsersText(value);
-                      setConfig(previous => ({ ...previous, authorizedUsers: value.split(/\r?\n/).filter(line => line.trim()).map(line => {
-                        const [, openId, displayName = ''] = line.trim().match(/^(\S+)(?:\s+(.*))?$/);
-                        const permissionPreset = previous.authorizedUsers.find(user => user.openId === openId)?.permissionPreset;
-                        return { openId, displayName, ...(permissionPreset ? { permissionPreset } : {}) };
-                      }) }));
-                      setNotice(null);
-                    } }),
-                  h('small', null, '仅允许名单中的用户，留空会拒绝所有用户。open_id 是用户在当前飞书应用内的身份标识，不能用姓名代替；显示名称用于命名 Harness 会话。')),
-                config.authorizedUsers.map((user, index) => h('div', { className: 'feishu-field', key: `${user.openId}-${index}` },
-                  h('label', { htmlFor: `${prefix}-user-permission-${index}` }, `${user.displayName || user.openId} 的工作区权限`),
-                  h('select', { id: `${prefix}-user-permission-${index}`, value: user.permissionPreset || '', disabled: Boolean(busy),
-                    onChange: event => edit('authorizedUsers', config.authorizedUsers.map((entry, entryIndex) => {
-                      if (entryIndex !== index) return entry;
-                      const { permissionPreset: _oldPermission, ...identity } = entry;
-                      return { ...identity, ...(event.target.value ? { permissionPreset: event.target.value } : {}) };
-                    })) },
-                  h('option', { value: '' }, '继承默认权限'),
-                  h('option', { value: 'read-only' }, '只读'),
-                  h('option', { value: 'workspace-write' }, '工作区写入')))),
-                h('p', { className: 'feishu-muted' }, '可为每位用户单独设置工作区读写权限；继承默认时使用上方权限预设。姓名修改保留同一 open_id 的权限，移除用户会同时移除其权限设置。'),
+                h('h3', null, '用户身份与会话'),
+                h('p', { className: 'feishu-muted' }, '请在飞书后台设置应用可用范围，控制谁能使用机器人；插件无需预填 open_id 或用户名。'),
+                h('p', { className: 'feishu-muted' }, '首次对话会先确认用户姓名；完成确认前只提示确认姓名，不处理其他问题。确认后的姓名用于会话标题和个人历史资料。'),
+                h('p', { className: 'feishu-muted' }, '用户身份由飞书消息自动识别，每位用户的工作目录和历史数据库仍独立隔离；姓名相同也不会合并数据。新用户使用上方工作区权限预设，旧配置中的个人权限设置继续保留。'),
                 h('p', { className: 'feishu-muted' }, '同一用户在同一聊天中默认延续当前会话，发送 /new 新开会话；不同用户、不同群聊的上下文分开，历史数据库仅供所属用户查询和管理。'),
                 field('dailyResetHour', '每日上下文切换时间（小时）', { numeric: true, hint: '默认凌晨 4 点。正在执行的任务完成后再切换，历史记录继续保留。' }),
                 field('dailyResetTimezone', '每日上下文切换时区', { placeholder: 'Asia/Macau', hint: '使用 IANA 时区名称，例如 Asia/Macau。/new 和每日切换只重置当前上下文，不删除历史；提及旧内容时可从个人历史数据库查找。' })),

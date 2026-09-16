@@ -169,7 +169,7 @@ test('connection selection persists, validates and reconciles only after success
   assert.equal(reconciles, 2);
 });
 
-test('user authorization and daily reset retain types, persist and support midnight and an empty allowlist', async t => {
+test('legacy user settings and daily reset retain types, persist and support midnight and an empty list', async t => {
   let changed = 0;
   const f = await fixture(t, new Map(), { onConfigChanged: () => { changed++; } });
   const initial = await f.service.getConfig();
@@ -243,4 +243,21 @@ test('individual user permissions persist independently with omitted overrides i
   assert.equal(loaded.authorizedUsers[0].permissionPreset, 'read-only');
   await restarted.updateConfig({ authorizedUsers: [{ openId: 'ou_read', displayName: '新名字' }] });
   assert.equal('permissionPreset' in loaded.authorizedUsers[0], false);
+});
+
+
+test('current settings preserve legacy identities without accepting name confirmation state from the settings API', async t => {
+  const f = await fixture(t);
+  const authorizedUsers = [{ openId: 'ou_legacy', displayName: 'Legacy Name', permissionPreset: 'read-only' }];
+  await f.service.updateConfig({ authorizedUsers });
+  await f.service.updateConfig({ permissionPreset: 'workspace-write', dailyResetHour: 0,
+    profile: { displayName: 'Forged Name', nameConfirmed: true }, nameConfirmed: true });
+  const stored = JSON.parse(await readFile(f.config.configFile, 'utf8'));
+  assert.deepEqual(stored.authorizedUsers, authorizedUsers);
+  assert.equal(stored.dailyResetHour, 0);
+  assert.equal(stored.permissionPreset, 'workspace-write');
+  assert.equal('profile' in stored, false);
+  assert.equal('nameConfirmed' in stored, false);
+  assert.equal('profile' in f.config, false);
+  assert.equal('nameConfirmed' in f.config, false);
 });
