@@ -3,8 +3,50 @@ window.__ModuleLoader__.load({
   id: '@icanotcode/dsh-feishu-bot',
   factory: (require) => {
     const React = require('react');
+    const { createRoot } = require('react-dom/client');
     const h = React.createElement;
     const { useEffect, useState, useId } = React;
+    // Harness inventory currently has no configuration slot. Attach only to our
+    // expanded cards, using its semantic attributes rather than generated CSS.
+    function mountInventorySettings() {
+      const selector = '[data-plugin-module="@icanotcode/dsh-feishu-bot"], [data-plugin-module="@deepseek-ai/dsh-feishu-bot"]';
+      const mounted = new Map();
+      function reconcile() {
+        for (const [details, entry] of mounted) {
+          if (details.isConnected && entry.card.dataset.open === 'true' && entry.card.contains(details)) continue;
+          entry.root.unmount();
+          entry.container.remove();
+          entry.card.removeAttribute('data-feishu-settings');
+          mounted.delete(details);
+        }
+        for (const card of document.querySelectorAll(selector)) {
+          if (card.dataset.open !== 'true') continue;
+          const trigger = card.querySelector('button[aria-controls]');
+          const details = document.getElementById(trigger?.getAttribute('aria-controls'));
+          if (!details || !card.contains(details) || mounted.has(details)) continue;
+          const container = document.createElement('div');
+          container.className = 'feishu-inventory-settings';
+          details.appendChild(container);
+          const root = createRoot(container);
+          mounted.set(details, { card, container, root });
+          card.setAttribute('data-feishu-settings', 'true');
+          root.render(h(FeishuSettings));
+        }
+      }
+      const observer = new MutationObserver(reconcile);
+      observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-open'] });
+      reconcile();
+      return () => {
+        observer.disconnect();
+        for (const { card, container, root } of mounted.values()) {
+          root.unmount();
+          container.remove();
+          card.removeAttribute('data-feishu-settings');
+        }
+        mounted.clear();
+      };
+    }
+
     const defaults = {
       connectionMode: 'webhook', appId: '', appSecret: '', verificationToken: '', encryptKey: '',
       workspacePath: '', agentPreset: 'standard', permissionPreset: 'workspace-write',
@@ -292,6 +334,8 @@ window.__ModuleLoader__.load({
     }
 
     const css = `
+      [data-feishu-settings="true"]{grid-column:1/-1}
+      .feishu-inventory-settings{border-top:1px solid var(--dsw-alias-border-l2,#ddd);margin-top:16px;padding-top:16px}
       .feishu-settings{max-width:760px;padding:8px 4px 24px;color:var(--dsw-alias-label-primary,#202124);font-size:14px;line-height:1.6}
       .feishu-settings *{box-sizing:border-box}.feishu-settings h2{margin:0 0 4px;font-size:21px}.feishu-settings h3{margin:0 0 16px;font-size:16px}
       .feishu-settings section{border:1px solid var(--dsw-alias-border-l2,#ddd);border-radius:12px;padding:18px;margin:20px 0}
@@ -308,7 +352,7 @@ window.__ModuleLoader__.load({
     `;
 
     return {
-      inject: ['slots'],
+      inject: [],
       apply(ctx) {
         ctx.effect(() => {
           const style = document.createElement('style');
@@ -317,12 +361,7 @@ window.__ModuleLoader__.load({
           document.head.appendChild(style);
           return () => style.remove();
         }, 'feishu-bot: settings styles');
-        ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
-          name: 'settings.plugins.tab', id: 'feishu-bot', order: 20, label: () => '飞书机器人'
-        }, FeishuSettings));
-        ctx.slots.inject('settings.section', () => ctx.slots.register({
-          name: 'settings.section', id: 'feishu-bot', order: 25, label: () => '飞书机器人'
-        }, FeishuSettings));
+        ctx.effect(mountInventorySettings, 'feishu-bot: inventory settings');
       }
     };
   }

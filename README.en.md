@@ -12,7 +12,7 @@ English · [简体中文](README.md)
 
 ## Introduction
 
-`dsh-feishu-bot` connects a Feishu bot to DeepSeek Harness. Enable it in the Harness plugin list, then use its settings page to enter application credentials, choose how to receive events, and set a working directory for tasks.
+`dsh-feishu-bot` connects a Feishu bot to DeepSeek Harness. Expand its card in the Harness Plugin list to enter application credentials, choose how to receive events, and set a working directory for tasks.
 
 The plugin supports two connection modes: **developer server (HTTP Webhook)** and **persistent connection (WebSocket)**. Use Webhook if you have a public endpoint, ngrok, or Cloudflare Tunnel; choose WebSocket if you run Harness locally without a public endpoint. Saving the configuration applies the selected mode.
 
@@ -26,13 +26,13 @@ This is an independently maintained community plugin, unaffiliated with DeepSeek
 
 ![Feishu plugin settings](assets/settings-cloudflare.png)
 
-Actual settings UI captured in an isolated demo environment with no application credentials configured. This older 0.1.3 screenshot does not include the 0.2.0 authorization and daily reset settings; the example hostname does not indicate a working public tunnel.
+Actual settings UI captured in an isolated demo environment with no application credentials configured. This older 0.1.3 screenshot predates the move into the Plugin list card and does not include the 0.2.0 authorization and daily reset settings; the example hostname does not indicate a working public tunnel.
 
 ## Current capabilities
 
 | Capability | Current behavior |
 | --- | --- |
-| Native settings entry | Appears in the plugin list; configuration is available on the “飞书机器人” settings page |
+| Plugin list entry | Expand the `feishu-bot` card in Plugin list to configure the plugin directly |
 | Two event transports | Choose Webhook or WebSocket; saving updates the runtime configuration |
 | Text message handling | Receives `im.message.receive_v1`; reuses the current session for the same tenant, authorized user, and chat |
 | Working indicator | Adds a `Typing` reaction to the original message when processing starts and attempts to remove it when processing ends; reaction failures do not block the task or reply |
@@ -89,7 +89,7 @@ npm run install:harness
 npm run start:harness
 ```
 
-Open the local URL printed in the startup log; the default port is `3080`. Search for `feishu` in the plugin list and open **Settings → Plugins → 飞书机器人**. The “飞书机器人” entry in Settings also opens the configuration page.
+Open the local URL printed in the startup log; the default port is `3080`. Open **Settings → Plugins → Plugin list**, search for `feishu`, and expand the `feishu-bot` card under **Global plugins** to configure it directly. This is the only entry; the plugin no longer adds a separate Feishu tab or sidebar item.
 
 The installer links this checkout into the Harness `web` profile and adds the required Webhook runtime. It backs up existing configuration before modifying it. **Keep the repository directory after installation.** If another instance already occupies the port, stop that instance in its original terminal first; the startup script does not stop services automatically. If you customize `DSH_HOME`, use the same value for installation and startup.
 

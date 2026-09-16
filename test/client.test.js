@@ -2,8 +2,131 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
+import { createInventoryDOM } from '../test-support/inventory-dom.mjs';
 
 const source = await readFile(new URL('../client/index.js', import.meta.url), 'utf8');
+
+function inventoryFixture(t, prepare = () => {}) {
+  const dom = createInventoryDOM();
+  const disposers = [];
+  const registrations = [];
+  let plugin;
+  const React = { createElement: (type, props) => ({ type, props }) };
+  prepare(dom);
+  vm.runInNewContext(source, {
+    window: { __ModuleLoader__: { load: definition => {
+      plugin = definition.factory(name => {
+        if (name === 'react') return React;
+        if (name === 'react-dom/client') return dom.reactDOM;
+        throw new Error(`Unexpected client dependency: ${name}`);
+      });
+    } } },
+    document: dom.document,
+    MutationObserver: dom.MutationObserver
+  });
+  plugin.apply({
+    effect(callback) { disposers.push(callback()); },
+    slots: { inject(name) { registrations.push(name); }, register(metadata) { registrations.push(metadata.name); } }
+  });
+  function dispose() { disposers.splice(0).reverse().forEach(cleanup => cleanup?.()); }
+  t.after(dispose);
+  dom.flush();
+  return { ...dom, registrations, dispose };
+}
+
+test('inventory attaches only to exact public and legacy plugin cards with owned details', t => {
+  const cards = {};
+  const f = inventoryFixture(t, dom => {
+    cards.public = dom.card();
+    cards.legacy = dom.card('@deepseek-ai/dsh-feishu-bot');
+    cards.other = dom.card('@someone/dsh-feishu-bot');
+    cards.similar = dom.card('@icanotcode/dsh-feishu-bot-extra');
+    cards.closed = dom.card('@icanotcode/dsh-feishu-bot', false);
+    cards.foreignDetails = dom.card();
+    cards.foreignDetails.button.setAttribute('aria-controls', cards.other.details.getAttribute('id'));
+    cards.noTrigger = dom.card();
+    cards.noTrigger.button.remove();
+  });
+  assert.equal(f.roots.length, 2);
+  assert.deepEqual(f.registrations, [], 'the inventory must be the sole navigation entry');
+  for (const name of ['public', 'legacy']) {
+    assert.equal(cards[name].details.children.length, 1);
+    assert.equal(cards[name].element.getAttribute('data-feishu-settings'), 'true');
+  }
+  for (const name of ['other', 'similar', 'closed', 'foreignDetails', 'noTrigger']) {
+    assert.equal(cards[name].details.children.length, 0);
+    assert.equal(cards[name].element.getAttribute('data-feishu-settings'), null);
+  }
+});
+
+test('inventory expansion mounts once, collapse unmounts, and reopening gets a fresh root', t => {
+  let card;
+  const f = inventoryFixture(t, dom => { card = dom.card('@icanotcode/dsh-feishu-bot', false); });
+  assert.equal(f.roots.length, 0);
+  card.element.setAttribute('data-open', 'true');
+  f.flush();
+  assert.equal(f.roots.length, 1);
+  assert.equal(f.roots[0].renders.length, 1);
+  card.details.appendChild(f.document.createElement('p'));
+  f.flush();
+  assert.equal(f.roots.length, 1, 'unrelated inventory mutations must retain draft state');
+  assert.equal(f.roots[0].renders.length, 1);
+  const panel = f.document.createElement('section');
+  f.document.body.appendChild(panel);
+  panel.appendChild(card.element);
+  panel.setAttribute('hidden', '');
+  f.flush();
+  assert.equal(f.roots[0].unmounts, 0, 'switching away from a retained hidden tab must preserve draft state');
+  panel.removeAttribute('hidden');
+  card.element.setAttribute('data-open', 'false');
+  f.flush();
+  assert.equal(f.roots[0].unmounts, 1);
+  assert.equal(f.roots[0].container.isConnected, false);
+  assert.equal(card.element.getAttribute('data-feishu-settings'), null);
+  card.element.setAttribute('data-open', 'true');
+  f.flush();
+  assert.equal(f.roots.length, 2);
+  assert.equal(f.roots[1].renders.length, 1);
+  assert.equal(f.roots[1].unmounts, 0);
+});
+
+test('inventory search removal and replacement details release stale roots', t => {
+  let card;
+  const f = inventoryFixture(t, dom => { card = dom.card(); });
+  card.element.remove();
+  f.flush();
+  assert.equal(f.roots[0].unmounts, 1);
+  assert.equal(card.details.children.length, 0);
+  f.document.body.appendChild(card.element);
+  f.flush();
+  assert.equal(f.roots.length, 2);
+  const replacement = f.document.createElement('div');
+  replacement.setAttribute('id', card.details.getAttribute('id'));
+  card.details.remove();
+  card.element.appendChild(replacement);
+  f.flush();
+  assert.equal(f.roots[1].unmounts, 1);
+  assert.equal(f.roots.length, 3);
+  assert.equal(replacement.contains(f.roots[2].container), true);
+});
+
+test('inventory plugin disposal disconnects observation and removes mounted roots and styles', t => {
+  let card;
+  const f = inventoryFixture(t, dom => { card = dom.card(); });
+  assert.equal(f.document.head.children.length, 1);
+  f.dispose();
+  assert.equal(f.observers.length, 1);
+  assert.equal(f.observers[0].disconnected, true);
+  assert.equal(f.roots[0].unmounts, 1);
+  assert.equal(card.details.children.length, 0);
+  assert.equal(card.element.getAttribute('data-feishu-settings'), null);
+  assert.equal(f.document.head.children.length, 0);
+  f.card();
+  f.flush();
+  f.dispose();
+  assert.equal(f.roots.length, 1, 'disposed plugins must not attach to later inventory renders');
+  assert.equal(f.roots[0].unmounts, 1);
+});
 
 async function fixture(t, initial = {}) {
   const hooks = [];
@@ -11,10 +134,13 @@ async function fixture(t, initial = {}) {
   const timers = new Map();
   const requests = [];
   const registrations = [];
+  const disposers = [];
   let cursor = 0;
   let tree;
   let component;
   let plugin;
+  const dom = createInventoryDOM(vnode => { component = vnode.type; });
+  dom.card();
   let timerId = 0;
   let saved = { connectionMode: 'webhook', tunnelProvider: 'ngrok', harnessPort: 4321, appId: 'cli_example', configured: { appSecret: true, verificationToken: true }, ...initial };
   let runtime = { mode: saved.connectionMode, state: saved.connectionMode === 'webhook' ? 'listening' : 'connected', message: '' };
@@ -36,7 +162,13 @@ async function fixture(t, initial = {}) {
     }
   };
   vm.runInNewContext(source, {
-    window: { __ModuleLoader__: { load: definition => { plugin = definition.factory(() => React); } } },
+    window: { __ModuleLoader__: { load: definition => { plugin = definition.factory(name => {
+      if (name === 'react') return React;
+      if (name === 'react-dom/client') return dom.reactDOM;
+      throw new Error(`Unexpected client dependency: ${name}`);
+    }); } } },
+    document: dom.document,
+    MutationObserver: dom.MutationObserver,
     fetch: async (url, options) => {
       requests.push({ url, ...options });
       if (url.endsWith('/config') && options.method === 'POST') {
@@ -52,7 +184,7 @@ async function fixture(t, initial = {}) {
     setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
     clearTimeout: id => timers.delete(id)
   });
-  plugin.apply({ effect() {}, slots: {
+  plugin.apply({ effect(callback) { disposers.push(callback()); }, slots: {
     inject: (_name, register) => register(),
     register: (metadata, view) => { registrations.push(metadata); component = view; }
   } });
@@ -64,7 +196,7 @@ async function fixture(t, initial = {}) {
   function text(node = tree) { return typeof node === 'object' ? node.children.map(text).join(' ') : String(node); }
   function field(key) { return nodes().find(node => node.props.id === `feishu-test-${key}`); }
   function edit(key, value) { field(key).props.onChange({ target: { value } }); render(); }
-  function dispose() { hooks.forEach(hook => hook?.cleanup?.()); }
+  function dispose() { hooks.forEach(hook => hook?.cleanup?.()); disposers.splice(0).reverse().forEach(cleanup => cleanup?.()); }
   t.after(dispose);
   render();
   await settle();
@@ -72,9 +204,9 @@ async function fixture(t, initial = {}) {
     setRuntime: value => { runtime = value; } };
 }
 
-test('both settings entries expose transport choice; unsaved selection does not claim runtime switched', async t => {
+test('inventory settings expose transport choice without extra navigation; unsaved selection does not claim runtime switched', async t => {
   const f = await fixture(t);
-  assert.deepEqual(f.registrations.map(entry => entry.name), ['settings.plugins.tab', 'settings.section']);
+  assert.deepEqual(f.registrations, []);
   assert.equal(f.field('connectionMode').props.value, 'webhook');
   assert.ok(f.field('verificationToken'));
   assert.equal(f.field('webhook').props.value, 'https://example.ngrok.app/webhook/feishu');
