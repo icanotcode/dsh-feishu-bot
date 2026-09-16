@@ -6,6 +6,7 @@ const request = () => ({ sessionId: 'feishu-user-alice-1', workspacePath: '/user
 function fixture() {
   const live = new Map();
   const stored = new Map();
+  const archived = new Set();
   const listeners = new Map();
   const globalGuards = new Set();
   const calls = [];
@@ -50,9 +51,9 @@ function fixture() {
     permissionPresets: { resolve: name => ({ name }), set: (_session, name) => calls.push(['permission', name]) },
     sessionTitle: { rename: (_session, title) => calls.push(['title', title]) },
     agentDefaultModel: { currentSelection: () => ({ provider: 'test', model: 'test-model' }) },
-    workspaceRegistry: { create: async path => ({ path, attachSession: async id => calls.push(['attach', id]) }) },
+    workspaceRegistry: { get archivedSessionIds() { return [...archived]; }, create: async path => ({ path, attachSession: async id => calls.push(['attach', id]) }) },
   };
-  return { ctx, live, stored, listeners, globalGuards, calls, agent };
+  return { ctx, live, stored, archived, listeners, globalGuards, calls, agent };
 }
 
 test('session creation composes protection before publication and concurrent callers share the agent', async () => {
@@ -203,5 +204,23 @@ test('live reuse refreshes display name and permission selection without replaci
   assert.equal(first.agent, next.agent);
   assert.equal(f.calls.filter(([name]) => name === 'title').at(-1)[1], 'Renamed user');
   assert.equal(f.calls.filter(([name]) => name === 'permission').at(-1)[1], 'workspace-write');
+  await host.dispose();
+});
+
+test('archived sessions cannot be reused or resumed, without cancelling the running turn', async () => {
+  const f = fixture();
+  const host = createSessionHost(f.ctx, { allowedTools: ['history'], isAuthorized: () => true });
+  const { agent } = await host.getOrCreate(request());
+  agent.status = 'running';
+  f.archived.add(agent.session.id);
+  assert.equal(host.isArchived(agent.session.id), true);
+  await assert.rejects(host.getOrCreate(request()), { name: 'ArchivedSessionError' });
+  assert.equal(agent.guards[0]({ agent, name: 'history' }), undefined, 'existing work keeps safe tools until completion');
+  assert.equal(f.calls.some(([name]) => name === 'cancel'), false);
+  agent.status = 'idle';
+  await host.release(agent.session.id);
+  await assert.rejects(host.getOrCreate(request()), { name: 'ArchivedSessionError' });
+  assert.equal(f.calls.some(([name]) => name === 'resume'), false);
+  assert.ok(f.stored.has(agent.session.id));
   await host.dispose();
 });

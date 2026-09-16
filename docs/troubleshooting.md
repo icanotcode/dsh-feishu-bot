@@ -184,3 +184,7 @@
 可在 [GitHub Issues](https://github.com/icanotcode/dsh-feishu-bot/issues) 提交：插件版本或提交号、Harness 版本、Node.js 版本、操作系统、接收方式、最短复现步骤，以及脱敏后的错误文本或 HTTP 状态。注明问题停在「地址验证」「没有创建会话」还是「会话完成但没有回复」，便于定位。
 
 不要上传应用密钥、完整 Harness 配置目录、带登录令牌的启动 URL 或原始飞书业务消息。
+
+## 飞书能回复，但 Archive 后 Harness 中找不到当前会话
+
+Harness 的 Archive 会隐藏会话，原任务可能仍在运行。当前插件会在收到下一条普通消息时检查归档状态，等旧任务结束后创建可见的新会话；旧会话仍保持归档，历史不会删除。发送 `/status` 可查看归档提示。若仍持续使用隐藏会话，确认插件已更新并重启 Harness。

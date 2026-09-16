@@ -16,6 +16,7 @@ export async function createConversationFixture(t, options = {}) {
   const replies = [];
   const reactions = [];
   const warnings = [];
+  const archived = new Set();
   const config = {
     source: 'test', workspacePath: workspace, historyRoot: join(root, 'history'),
     agentPreset: 'standard', permissionPreset: 'workspace-write', dailyResetTimezone: 'UTC', dailyResetHour: 4,
@@ -42,7 +43,7 @@ export async function createConversationFixture(t, options = {}) {
     deleteMessageReaction: async (...args) => { reactions.push(['delete', ...args]); },
     ...options.client,
   };
-  const fixture = { root, config, ctx, listeners, tools, replies, reactions, warnings, client, emit };
+  const fixture = { root, config, ctx, listeners, tools, replies, reactions, warnings, client, emit, archived };
   function makeHost() {
     const agents = new Map();
     const calls = [];
@@ -74,6 +75,7 @@ export async function createConversationFixture(t, options = {}) {
     }
     const host = {
       agents, calls,
+      isArchived: id => archived.has(id),
       async getOrCreate(request) {
         calls.push(request);
         if (!agents.has(request.sessionId)) agents.set(request.sessionId, createAgent(request));

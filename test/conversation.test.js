@@ -1,8 +1,95 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createConversationFixture } from '../test-support/conversation-fixture.mjs';
+import { ArchivedSessionError } from '../lib/session-host.js';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('archiving the current Harness session routes the next message to a visible new session with history retained', async t => {
+  const f = await createConversationFixture(t);
+  await f.send({ text: 'remember before archive' });
+  const old = [...f.agents.values()][0];
+  await f.claim(old); await f.finish(old, 'old answer');
+  f.archived.add(old.session.id);
+  await f.send({ text: '/status' });
+  assert.match(f.replies.at(-1)[1], /已在 Harness 归档/);
+  assert.equal(f.host.calls.length, 1, 'status does not create a session');
+  await f.send({ text: 'continue after archive', messageId: 'after-archive' });
+  const current = f.store().getCurrentSession('chat-a');
+  assert.notEqual(current.sessionId, old.session.id);
+  assert.equal(f.archived.has(current.sessionId), false);
+  assert.equal(f.archived.has(old.session.id), true, 'respect the user archive action');
+  assert.equal(f.store().getSession(old.session.id).closeReason, 'harness-archived');
+  assert.equal(f.store().searchMessages({ query: 'remember before archive' }).length, 1);
+  assert.match(f.host.calls.at(-1).title, /^Alice/);
+  const agent = f.agents.get(current.sessionId);
+  await f.claim(agent); await f.finish(agent, 'visible answer');
+  assert.deepEqual(f.replies.at(-1), ['after-archive', 'visible answer']);
+  await f.send({ text: 'continue visible' });
+  assert.equal(f.store().getCurrentSession('chat-a').sessionId, current.sessionId);
+});
+
+test('archive rotation waits for in-flight and queued work and never routes the new message to the hidden agent', async t => {
+  const f = await createConversationFixture(t);
+  await f.send({ text: 'running task', messageId: 'running' });
+  const old = [...f.agents.values()][0];
+  await f.claim(old);
+  await f.send({ text: 'already queued', messageId: 'queued' });
+  f.archived.add(old.session.id);
+  let accepted = false;
+  const next = f.send({ text: 'after archive', messageId: 'new' }).then(() => { accepted = true; });
+  await tick();
+  assert.equal(accepted, false);
+  assert.equal(old.queue.length, 1);
+  assert.equal(f.store().getMessageByFeishuId('new').text, 'after archive');
+  await f.finish(old, 'running result');
+  await tick();
+  assert.equal(accepted, false);
+  await f.claim(old); await f.finish(old, 'queued result');
+  await next;
+  assert.equal(f.agents.has(old.session.id), false);
+  const current = f.store().getCurrentSession('chat-a');
+  assert.notEqual(current.sessionId, old.session.id);
+  assert.equal(f.agents.get(current.sessionId).queue.length, 1);
+  assert.ok(f.replies.some(([id, text]) => id === 'running' && text === 'running result'));
+  assert.ok(f.replies.some(([id, text]) => id === 'queued' && text === 'queued result'));
+});
+
+test('archive remains effective after restart and only rotates the affected user/chat binding', async t => {
+  const f = await createConversationFixture(t);
+  await f.send({ text: 'old private context' });
+  const old = [...f.agents.values()][0];
+  await f.claim(old); await f.finish(old);
+  await f.send({ text: 'other chat', chatId: 'group' });
+  const group = f.agents.get(f.store().getCurrentSession('group').sessionId);
+  await f.claim(group); await f.finish(group);
+  f.archived.add(old.session.id);
+  await f.restart();
+  await f.send({ text: 'after restart' });
+  assert.notEqual(f.store().getCurrentSession('chat-a').sessionId, old.session.id);
+  assert.equal(f.store().getCurrentSession('group').sessionId, group.session.id);
+});
+
+for (const phase of ['during-resume', 'after-resume']) test(`archive ${phase} retries admission once and queues the message exactly once`, async t => {
+  const f = await createConversationFixture(t);
+  await f.send({ text: 'first' });
+  const old = [...f.agents.values()][0];
+  await f.claim(old); await f.finish(old);
+  const open = f.host.getOrCreate.bind(f.host);
+  f.host.getOrCreate = async request => {
+    if (request.sessionId === old.session.id) {
+      f.archived.add(old.session.id);
+      if (phase === 'during-resume') throw new ArchivedSessionError();
+    }
+    return open(request);
+  };
+  await f.send({ text: 'concurrent with archive', messageId: 'racing' });
+  const current = f.store().getCurrentSession('chat-a');
+  assert.notEqual(current.sessionId, old.session.id);
+  assert.equal(f.agents.get(current.sessionId).queue.length, 1);
+  assert.equal(f.store().getMessageByFeishuId('racing').sessionId, current.sessionId);
+  assert.equal(f.store().searchMessages({ query: 'concurrent with archive' }).length, 1);
+});
 
 test('ordinary messages reuse one session and reply only to the message claimed by each turn', async t => {
   const f = await createConversationFixture(t);
