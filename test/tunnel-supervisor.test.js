@@ -112,7 +112,7 @@ test('provider, mode and port changes stop only owned child and use fresh config
   const f = fixture({ tunnelAutoRestart: true }); await f.instance.start();
   f.setPort(7777); await f.instance.reconcile(); assert.equal(f.calls.length, 2); assert.ok(f.calls[0].child.signalCode);
   assert.ok(f.calls[1].args.includes('http://127.0.0.1:7777'));
-  f.config.tunnelProvider = 'cloudflare'; await f.instance.reconcile(); assert.equal(f.calls[2].command, 'cloudflared');
+  f.config.tunnelProvider = 'cloudflare'; await f.instance.reconcile(); assert.equal(f.calls[2].command, process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared');
   f.config.connectionMode = 'websocket'; await f.instance.reconcile(); assert.equal((await f.instance.status()).state, 'not_required');
   assert.ok(f.calls[2].child.signalCode); await f.instance.dispose();
 });
