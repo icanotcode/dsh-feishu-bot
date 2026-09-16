@@ -148,6 +148,8 @@ A successful credential test confirms application authentication. Saving the req
 | Non-secret configuration | Stored in `feishu-bot.json` under `DSH_HOME`; the default `DSH_HOME` is `~/.dsh` |
 | Secrets | Saved by the Harness credentials service; blank settings fields preserve existing values. Values supplied through environment variables must be changed in the startup environment |
 
+Deleting a Feishu workspace in the Harness UI only removes its registration. The next ordinary message recreates that registration and reconnects the existing session, preserving context. Deleting the actual working directory is different: the plugin can recreate an empty directory but cannot recover deleted working files; its separately stored history database is unaffected by removing only that directory.
+
 Archiving the active Feishu session in Harness causes the next ordinary Feishu message to start a new, visible session. Existing work finishes first. The old session stays archived and its history remains searchable; its model context is not copied into the new session. `/status` reports an archived current session.
 
 Databases are separated by stable source, tenant, and user identity. Names are stored in user profiles and used for session titles, not as database or workspace paths. Two users with the same name still have separate data. Each chat has independent context. History tools are restricted to records for the current user and chat, with timestamps stored in local SQLite databases.

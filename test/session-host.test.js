@@ -7,6 +7,7 @@ function fixture() {
   const live = new Map();
   const stored = new Map();
   const archived = new Set();
+  const workspaces = new Map();
   const listeners = new Map();
   const globalGuards = new Set();
   const calls = [];
@@ -51,9 +52,19 @@ function fixture() {
     permissionPresets: { resolve: name => ({ name }), set: (_session, name) => calls.push(['permission', name]) },
     sessionTitle: { rename: (_session, title) => calls.push(['title', title]) },
     agentDefaultModel: { currentSelection: () => ({ provider: 'test', model: 'test-model' }) },
-    workspaceRegistry: { get archivedSessionIds() { return [...archived]; }, create: async path => ({ path, attachSession: async id => calls.push(['attach', id]) }) },
+    workspaceRegistry: {
+      get archivedSessionIds() { return [...archived]; },
+      create: async path => {
+        if (!workspaces.has(path)) workspaces.set(path, { path, sessionIds: [], attachSession: async id => {
+          calls.push(['attach', id]);
+          const ids = workspaces.get(path).sessionIds;
+          if (!ids.includes(id)) ids.push(id);
+        } });
+        return workspaces.get(path);
+      },
+    },
   };
-  return { ctx, live, stored, archived, listeners, globalGuards, calls, agent };
+  return { ctx, live, stored, archived, workspaces, listeners, globalGuards, calls, agent };
 }
 
 test('session creation composes protection before publication and concurrent callers share the agent', async () => {
@@ -222,5 +233,47 @@ test('archived sessions cannot be reused or resumed, without cancelling the runn
   await assert.rejects(host.getOrCreate(request()), { name: 'ArchivedSessionError' });
   assert.equal(f.calls.some(([name]) => name === 'resume'), false);
   assert.ok(f.stored.has(agent.session.id));
+  await host.dispose();
+});
+
+test('deleted workspace registration is restored for a live session without replacing its context', async () => {
+  const f = fixture();
+  const host = createSessionHost(f.ctx, { isAuthorized: () => true });
+  const first = await host.getOrCreate(request());
+  f.workspaces.delete(request().workspacePath);
+  first.agent.status = 'running';
+  const next = await host.getOrCreate(request());
+  assert.equal(next.agent, first.agent);
+  assert.deepEqual(f.workspaces.get(request().workspacePath).sessionIds, [request().sessionId]);
+  assert.equal(f.calls.filter(([name]) => name === 'create').length, 1);
+  assert.equal(f.calls.some(([name]) => name === 'cancel'), false);
+  await host.getOrCreate(request());
+  assert.deepEqual(f.workspaces.get(request().workspacePath).sessionIds, [request().sessionId]);
+  await host.dispose();
+});
+
+test('durable session resumes into a recreated workspace; archived sessions stay archived', async () => {
+  const f = fixture();
+  const host = createSessionHost(f.ctx, { isAuthorized: () => true });
+  const first = await host.getOrCreate(request());
+  await host.release(request().sessionId);
+  f.workspaces.clear();
+  const resumed = await host.getOrCreate(request());
+  assert.notEqual(resumed.agent, first.agent);
+  assert.equal(resumed.agent.session.id, first.agent.session.id);
+  assert.deepEqual(f.workspaces.get(request().workspacePath).sessionIds, [request().sessionId]);
+  f.archived.add(request().sessionId);
+  f.workspaces.clear();
+  await assert.rejects(host.getOrCreate(request()), { name: 'ArchivedSessionError' });
+  assert.equal(f.workspaces.size, 0);
+  await host.dispose();
+});
+
+test('workspace reattachment failure does not report a live session as ready', async () => {
+  const f = fixture();
+  const host = createSessionHost(f.ctx, { isAuthorized: () => true });
+  await host.getOrCreate(request());
+  f.ctx.workspaceRegistry.create = async () => { throw new Error('Registry unavailable'); };
+  await assert.rejects(host.getOrCreate(request()), /Registry unavailable/);
   await host.dispose();
 });
