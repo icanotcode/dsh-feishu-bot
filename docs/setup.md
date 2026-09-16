@@ -55,6 +55,8 @@ npm run start:ngrok -- --url https://YOUR-NGROK-DOMAIN --port 3080
 
 `--port` 与 Harness 的实际监听端口保持一致；也可通过 `NGROK_URL` 提供域名。有自己的 traffic policy 时，可追加 `--traffic-policy-file PATH`。策略需要允许飞书的 Webhook 请求到达该路径，不应要求飞书完成浏览器登录；Harness 管理页面仍应保留原有访问保护。
 
+设置页会显示只读的「当前 Harness 监听端口」，并用实际端口生成 ngrok / Cloudflare 启动命令，端口不固定为 `3080`。例如要改为 `4321`，先停止原 Harness 实例，再运行 `npm run start:harness -- --port 4321`，同时把隧道的目标端口改为 `4321`。插件共用 Harness 的 HTTP 服务，没有独立监听端口；仅修改隧道端口或保存插件设置不会移动该服务。
+
 插件会读取本机 `127.0.0.1:4040` 的 ngrok 隧道信息，仅选择指向当前 Harness 端口的 HTTPS 隧道。如果「公网服务地址」留空，可用检测到的隧道生成 Webhook URL。填写了公网服务地址时，以填写值为准。设置页只检测隧道，不负责启动、停止或配置 ngrok。
 
 #### 使用 Cloudflare Tunnel
@@ -152,6 +154,18 @@ App Secret、Verification Token、Encrypt Key 不会回显；出现「已保存�
 
 ## 启动参数与更新
 
+### 平台与端口
+
+插件核心使用 Node.js，面向 Linux、Windows 和 macOS。安装器在 Windows 使用目录 junction，在 Linux/macOS 使用符号链接。各系统均可运行本文的 `npm run` 命令；Windows 建议使用 PowerShell。Bash 的 `alias` 不是插件依赖，也不能直接粘贴进 PowerShell。
+
+Windows 的工作目录可填写 `C:\Projects\my-project`，Linux/macOS 填写各自本机目录；路径中有空格时，在命令行中用引号包裹。ngrok 和 cloudflared 需要安装对应系统版本，并加入 PATH。插件不会自动安装这些程序。
+
+目前本机验证环境是 Linux。CI 配置覆盖三种系统的自动测试，但真实飞书收发、隧道连通和后台进程行为仍需在目标系统验收；不能仅凭代码兼容认定三平台所有场景均已通过。
+
+Harness 与飞书回调共用同一个监听端口。插件会自动获取该端口，无需再保存一个可能不一致的副本；修改监听端口需要重启 Harness，并同步调整隧道目标。
+
+### 启动命令
+
 在插件源码目录运行，默认以前台方式启动 Harness，日志显示在当前终端：
 
 ```bash
@@ -167,7 +181,7 @@ npm run start:harness -- --background
 
 后台运行时，日志位于插件目录的 `.runtime/harness.log`。`--background` 只检查进程启动后短时间内是否退出，需通过日志确认服务实际就绪。若已有实例占用端口，请在其原启动终端停止后再启动，脚本不会自动停止已有服务。
 
-脚本优先使用 `DSH_BIN` 指定的入口，其次查找 PATH 中的 `dsh` 和已有 npm npx 缓存。如果提示未找到 Harness，先确认官方程序已安装；也可以通过启动环境中的 `DSH_BIN` 指定 JavaScript 入口或原生可执行文件。Windows 上不要将 `DSH_BIN` 指向 `.cmd` / `.bat`，当前脚本不支持这两种入口。
+脚本优先使用 `DSH_BIN` 指定的入口，其次查找 PATH 中的 Harness 入口和已有 npm npx 缓存；Windows 会读取 npm 安装目录中的 JS 入口，避免执行 shell shim。如果提示未找到 Harness，先确认官方程序已安装；也可以通过启动环境中的 `DSH_BIN` 指定 JavaScript 入口或原生可执行文件。Windows 上不要将 `DSH_BIN` 指向 `.cmd` / `.bat`，当前脚本不支持这两种入口。
 
 ngrok 也支持后台运行，日志位于 `.runtime/ngrok.log`：
 

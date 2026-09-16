@@ -20,7 +20,7 @@
 飞书文本消息 → Webhook / 长连接 → Harness Agent → 回复原飞书消息
 ```
 
-这是独立维护的社区插件，与 DeepSeek、飞书无隶属关系。当前版本为 **0.1.3**，通过本仓库源码安装；尚未发布到 npm。
+这是独立维护的社区插件，与 DeepSeek、飞书无隶属关系。当前版本为 **0.1.4**，通过本仓库源码安装；尚未发布到 npm。
 
 ## 设置界面
 
@@ -65,6 +65,8 @@ Harness 会出现一个对应会话，处理完成后由插件回复最终文本
 - 一个已启用机器人能力的飞书企业自建应用及其 App ID、App Secret。
 
 当前兼容验证基于 Harness **0.1.5-rc.2** 相关组件，使用 **Web profile**。其他版本和运行方式尚未验证。
+
+插件面向 Linux、Windows 和 macOS，使用相同的 Node.js 安装命令；Webhook 模式需另行安装对应系统的 ngrok 或 cloudflared，长连接模式不需要隧道。当前本机实测环境为 Linux；三系统自动测试配置不等于三系统均已完成真实飞书收发验收。Windows 可使用 PowerShell，不需要照搬 Bash 的 `alias`；工作目录填写本机路径，例如 `C:\Projects\my-project`。详情见 [平台与端口说明](docs/setup.md#平台与端口)。
 
 尚未安装 Harness 时，先运行：
 

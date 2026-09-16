@@ -205,6 +205,9 @@ window.__ModuleLoader__.load({
                 ] })),
               config.connectionMode === 'webhook' && h('section', null,
                 h('h3', null, 'Webhook 与公网地址'),
+                h('label', { htmlFor: `${prefix}-harness-port` }, '当前 Harness 监听端口'),
+                h('input', { id: `${prefix}-harness-port`, readOnly: true, value: config.harnessPort || '', placeholder: '等待获取实际端口' }),
+                h('p', { className: 'feishu-muted' }, '端口由 Harness 管理，插件自动读取。需要更换时，停止原实例，再用 dsh web --port 新端口 启动，并同步修改隧道目标端口；保存插件配置不会更改监听端口。'),
                 field('tunnelProvider', '公网接入方式', { choices: [
                   ['ngrok', 'ngrok'], ['cloudflare', 'Cloudflare Tunnel'], ['custom', '自定义公网地址 / 反向代理']
                 ], hint: '选择后保存生效。隧道由你在本机或服务器上启动，插件不自动启动或停止。' }),
@@ -232,7 +235,11 @@ window.__ModuleLoader__.load({
                   : '尚未取得公网接入状态'),
                 tunnel?.message && h('p', { className: 'feishu-muted' }, tunnel.message),
                 statusError && h('p', { role: 'alert', className: 'feishu-error' }, statusError),
-                config.tunnelProvider === 'ngrok' && h('p', { className: 'feishu-muted' }, '请在本机启动 ngrok；此处检测指向当前 Harness 端口的已有隧道。'),
+                config.tunnelProvider === 'ngrok' && h('div', { className: 'feishu-muted' },
+                  h('p', null, '请在本机启动 ngrok；此处检测指向当前 Harness 端口的已有隧道。将 YOUR-NGROK-DOMAIN 替换为自己的域名，并按需保留现有的 --traffic-policy-file 参数：'),
+                  h('code', null, Number.isInteger(config.harnessPort) && config.harnessPort > 0
+                    ? `ngrok http ${config.harnessPort} --url https://YOUR-NGROK-DOMAIN` : '请先刷新页面以获取当前 Harness 端口'),
+                  h('p', null, '飞书 POST 回调不能完成浏览器登录。入口策略需要允许它到达 /webhook/feishu，由插件校验飞书凭据；管理页面保留访问保护。')),
                 button('刷新状态', () => run('status', refreshStatus), 'status')),
               h('div', { className: 'feishu-actions' },
                 h('button', { type: 'submit', disabled: Boolean(busy), className: 'feishu-primary' }, busy === 'save' ? '保存中…' : '保存配置'))),

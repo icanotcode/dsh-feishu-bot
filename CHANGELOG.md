@@ -1,5 +1,11 @@
 # 更新日志
 
+## 0.1.4
+
+- 设置页显示实际 Harness 监听端口，并据此生成 ngrok 启动命令；说明更换端口需要重启 Harness 并同步隧道目标。
+- 修复 Windows 下误把 npm shell shim 当作可执行入口的问题，补充 Windows npm 缓存路径查找。
+- 自动测试矩阵扩展至 Linux、Windows、macOS 与 Node.js 22/24；补充跨平台使用说明，真实飞书收发仍需在目标环境验收。
+
 ## 0.1.3
 
 - Webhook 设置新增公网接入方式选择：ngrok、Cloudflare Tunnel、自定义公网地址。保留 ngrok 默认行为；Cloudflare 和自定义方式使用手动填写的 HTTPS 根地址，不回退至 ngrok，不将配置成功当作公网连通。

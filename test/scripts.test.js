@@ -5,11 +5,14 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { findHarnessEntry } from '../scripts/harness-entry.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const packageName = '@example/feishu-test';
 async function fixture(t) {
-  const dir = await mkdtemp(join(tmpdir(), 'dsh-publish-scripts-'));
+  // macOS may expose /var through a /private/var symlink. Compare canonical
+  // fixture paths with the installer and realpath() on every platform.
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'dsh-publish-scripts-')));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const plugin = join(dir, 'plugin');
   const home = join(dir, 'home');
@@ -183,4 +186,36 @@ test('Harness start accepts a JS entry path with spaces and forwards arguments a
   const result = f.run('start.mjs', ['--port', '4321'], { DSH_BIN: binary, ARG_OUTPUT: output });
   assert.equal(result.status, 4, result.stderr);
   assert.deepEqual(JSON.parse(await readFile(output, 'utf8')), ['web', '--no-open', '--port', '4321']);
+});
+
+test('Windows resolves npm package JS instead of an extensionless shell shim', async t => {
+  const f = await fixture(t);
+  const bin = join(f.dir, 'npm prefix with spaces');
+  const entry = join(bin, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js');
+  await mkdir(join(bin, 'node_modules', '@deepseek-ai', 'dsh', 'lib'), { recursive: true });
+  await writeFile(join(bin, 'dsh'), '#!/bin/sh\nexit 99');
+  await writeFile(join(bin, 'dsh.cmd'), '@echo off\nexit /b 99');
+  await writeFile(entry, '');
+  assert.equal(await findHarnessEntry({ env: { Path: bin }, platform: 'win32', home: f.dir }), entry);
+});
+
+test('Windows skips shell shims and resolves the local npm npx cache', async t => {
+  const f = await fixture(t);
+  const bin = join(f.dir, 'bin');
+  await mkdir(bin);
+  await writeFile(join(bin, 'dsh'), '#!/bin/sh\nexit 99');
+  const local = join(f.dir, 'Local AppData');
+  const lib = join(local, 'npm-cache', '_npx', 'cached', 'node_modules', '@deepseek-ai', 'dsh', 'lib');
+  await mkdir(lib, { recursive: true });
+  await writeFile(join(lib, 'bin.js'), '');
+  assert.equal(await findHarnessEntry({ env: { PATH: bin, LOCALAPPDATA: local }, platform: 'win32', home: f.dir }), join(lib, 'bin.js'));
+});
+
+test('Harness entry honors explicit JS and native executables and rejects Windows shell wrappers', async () => {
+  for (const entry of ['C:/Harness/bin.js', 'C:/Harness/bin.cjs', 'C:/Harness/dsh.exe']) {
+    assert.equal(await findHarnessEntry({ env: { DSH_BIN: entry }, platform: 'win32' }), entry);
+  }
+  for (const entry of ['C:/Harness/dsh', 'C:/Harness/dsh.cmd', 'C:/Harness/dsh.bat']) {
+    await assert.rejects(findHarnessEntry({ env: { DSH_BIN: entry }, platform: 'win32' }), /DSH_BIN/);
+  }
 });

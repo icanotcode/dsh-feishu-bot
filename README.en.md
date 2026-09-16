@@ -20,7 +20,7 @@ The plugin supports two connection modes: **developer server (HTTP Webhook)** an
 Feishu text message → Webhook / WebSocket → Harness Agent → Reply to the original Feishu message
 ```
 
-This is an independently maintained community plugin, unaffiliated with DeepSeek or Feishu. The current version is **0.1.3**. Install it from this repository; it has not been published to npm.
+This is an independently maintained community plugin, unaffiliated with DeepSeek or Feishu. The current version is **0.1.4**. Install it from this repository; it has not been published to npm.
 
 ## Settings preview
 
@@ -65,6 +65,10 @@ A corresponding session appears in Harness, and the plugin sends the final text 
 - A Feishu enterprise custom app with bot capability enabled, plus its App ID and App Secret.
 
 Compatibility checks currently cover Harness **0.1.5-rc.2** components using the **Web profile**. Other versions and runtime configurations have not been verified.
+
+The plugin targets Linux, Windows, and macOS using the same Node.js installation commands. Webhook mode requires the appropriate ngrok or cloudflared binary for your OS; WebSocket mode needs no tunnel. Local checks were performed on Linux; a three-OS CI configuration does not imply live Feishu messaging has been verified on all three systems. On Windows, use PowerShell and a local Windows workspace path instead of copying Bash aliases.
+
+The settings page reads the actual Harness listening port and generates tunnel commands from it. To change that port, stop the existing Harness process and restart with `npm run start:harness -- --port 4321`, then point the tunnel at the same port. Saving plugin settings does not change the shared Harness listener.
 
 If Harness is not installed yet, run:
 

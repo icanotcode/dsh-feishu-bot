@@ -78,6 +78,10 @@ test('both settings entries expose transport choice; unsaved selection does not 
   assert.equal(f.field('connectionMode').props.value, 'webhook');
   assert.ok(f.field('verificationToken'));
   assert.equal(f.field('webhook').props.value, 'https://example.ngrok.app/webhook/feishu');
+  assert.equal(f.field('harness-port').props.value, 4321);
+  assert.equal(f.field('harness-port').props.readOnly, true);
+  assert.match(f.text(), /ngrok http 4321 --url https:\/\/YOUR-NGROK-DOMAIN/);
+  assert.doesNotMatch(f.text(), /ngrok http 3080/);
   f.edit('connectionMode', 'websocket');
   assert.equal(f.field('verificationToken'), undefined);
   assert.equal(f.field('webhook'), undefined);

@@ -1,7 +1,7 @@
 {
   "name": "@icanotcode/dsh-feishu-bot",
   "description": "飞书机器人：在 DeepSeek Harness 中配置飞书、接收消息并回复 Agent 结果",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -34,7 +34,7 @@
     "js-yaml": "^4.1.0"
   },
   "scripts": {
-    "test": "node --test test/*.test.js",
+    "test": "node --test",
     "install:harness": "node scripts/install.mjs",
     "start:harness": "node scripts/start.mjs",
     "start:ngrok": "node scripts/start-ngrok.mjs",
