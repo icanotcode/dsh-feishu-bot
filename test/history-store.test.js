@@ -198,7 +198,16 @@ test('cached databases reject newly linked journals and substituted directory an
   assert.throws(() => user.searchMessages(), /hard links/);
   rmSync(journal);
   assert.deepEqual(user.searchMessages(), []);
-  const relocated = userDirectory + '-moved'; renameSync(userDirectory, relocated);
+  const relocated = userDirectory + '-moved';
+  try { renameSync(userDirectory, relocated); }
+  catch (error) {
+    // Windows can itself prohibit replacing a directory holding an open SQLite
+    // handle. In that case the attack is prevented before our path check runs.
+    if (process.platform !== 'win32' || !['EPERM', 'EACCES'].includes(error.code)) throw error;
+    assert.equal(user.getSession('session-1').sessionId, 'session-1');
+    t.diagnostic('Windows denied renaming the open database directory; original database remains usable.');
+    return;
+  }
   symlinkSync(relocated, userDirectory, process.platform === 'win32' ? 'junction' : 'dir');
   assert.throws(() => user.searchMessages(), /symbolic links/);
   assert.throws(() => user.appendMessage({ sessionId: 'session-1', role: 'note', text: 'no' }), /symbolic links/);
