@@ -24,3 +24,6 @@ coverage/
 
 .credentials.*
 .npmrc
+.cloudflared/
+cloudflared.yml
+cloudflared.yaml

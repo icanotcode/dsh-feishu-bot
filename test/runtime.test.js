@@ -111,6 +111,9 @@ test('plugin config imports with Schemastery and leaves model selection to the d
   assert.equal(defaults.model, undefined);
   assert.equal(defaults.path, '/webhook/feishu');
   assert.equal(defaults.permissionPreset, 'workspace-write');
+  assert.equal(defaults.tunnelProvider, 'ngrok');
+  assert.equal(Config({ tunnelProvider: 'cloudflare' }).tunnelProvider, 'cloudflare');
+  assert.throws(() => Config({ tunnelProvider: 'unsupported' }));
   assert.throws(() => Config({ model: {} }));
 });
 

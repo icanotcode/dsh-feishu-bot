@@ -53,7 +53,7 @@ test('configuration persists across recreation, keeps blank secrets and never re
 
 test('all management routes reject untrusted requests before reads or writes', async t => {
   const f = await fixture(t);
-  for (const path of ['/config', '/test', '/ngrok/start', '/ngrok/stop', '/ngrok/status', '/webhook-url', '/connection/status']) {
+  for (const path of ['/config', '/test', '/ngrok/start', '/ngrok/stop', '/ngrok/status', '/tunnel/status', '/webhook-url', '/connection/status']) {
     const result = await f.request(path, 'POST', { appSecret: 'must-not-save' }, { host: 'public-tunnel.example' });
     assert.equal(result.status, 403);
   }
@@ -63,6 +63,55 @@ test('all management routes reject untrusted requests before reads or writes', a
   assert.equal((await f.request('/config', 'POST', '{')).status, 400);
   assert.equal((await f.request('/config', 'POST', {}, { 'content-length': '70000' })).status, 413);
   assert.equal((await f.request('/config', 'POST', {}, { 'content-type': 'text/plain' })).status, 415);
+});
+
+test('Cloudflare and custom providers persist without ngrok fallback or unverified connection claims', async t => {
+  const f = await fixture(t);
+  t.mock.method(globalThis, 'fetch', () => { throw new Error('Must not probe ngrok for this provider'); });
+  assert.equal((await f.request('/config')).body.tunnelProvider, 'ngrok');
+  f.ctx.webServer.port = 4567;
+  for (const provider of ['cloudflare', 'custom']) {
+    assert.equal((await f.request('/config', 'POST', { tunnelProvider: provider, publicBaseUrl: '' })).status, 200);
+    assert.equal(await f.service.getWebhookUrl(), null);
+    assert.equal((await f.request('/tunnel/status')).body.state, 'unconfigured');
+    assert.equal((await f.request('/config', 'POST', { publicBaseUrl: 'https://tunnel.example/' })).status, 200);
+    const status = (await f.request('/tunnel/status')).body;
+    assert.equal(status.provider, provider);
+    assert.equal(status.state, 'configured');
+    assert.equal(status.running, null);
+    assert.equal(status.port, 4567);
+    assert.equal(status.managed, false);
+    assert.equal((await f.request('/config')).body.harnessPort, 4567);
+    assert.equal(await f.service.getWebhookUrl(), 'https://tunnel.example/webhook/feishu');
+    const loaded = { ...f.config, tunnelProvider: 'ngrok', publicBaseUrl: '' };
+    const restarted = await createManagement(f.ctx, loaded, {});
+    assert.equal(loaded.tunnelProvider, provider);
+    assert.equal(await restarted.getWebhookUrl(), 'https://tunnel.example/webhook/feishu');
+    f.service = restarted;
+    f.config = loaded;
+  }
+  assert.equal(globalThis.fetch.mock.calls.length, 0);
+});
+
+test('provider validation is atomic and websocket mode never probes tunnels or offers a callback URL', async t => {
+  const f = await fixture(t);
+  t.mock.method(globalThis, 'fetch', () => { throw new Error('No tunnel required'); });
+  for (const tunnelProvider of ['invalid', '', null, 1]) {
+    assert.equal((await f.request('/config', 'POST', { tunnelProvider, publicBaseUrl: 'https://other.example' })).status, 400);
+    assert.equal(f.config.publicBaseUrl, undefined);
+  }
+  for (const publicBaseUrl of ['http://example.com', 'https://example.com/path', 'https://user:pass@example.com', 'https://example.com?q=1']) {
+    assert.equal((await f.request('/config', 'POST', { tunnelProvider: 'cloudflare', publicBaseUrl })).status, 400);
+    assert.equal(f.config.tunnelProvider, 'ngrok');
+  }
+  for (const tunnelProvider of ['ngrok', 'cloudflare', 'custom']) {
+    await f.service.updateConfig({ connectionMode: 'websocket', tunnelProvider, publicBaseUrl: 'https://saved.example' });
+    assert.equal(await f.service.getWebhookUrl(), null);
+    const status = await f.service.getTunnelStatus();
+    assert.equal(status.state, 'not_required');
+    assert.equal(status.url, null);
+  }
+  assert.equal(globalThis.fetch.mock.calls.length, 0);
 });
 
 test('connection test uses saved credentials, has a deadline and does not return tokens', async t => {

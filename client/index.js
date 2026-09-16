@@ -8,7 +8,7 @@ window.__ModuleLoader__.load({
     const defaults = {
       connectionMode: 'webhook', appId: '', appSecret: '', verificationToken: '', encryptKey: '',
       workspacePath: '', agentPreset: 'standard', permissionPreset: 'workspace-write',
-      ngrokAuthtoken: '', ngrokDomain: '', publicBaseUrl: ''
+      tunnelProvider: 'ngrok', ngrokAuthtoken: '', ngrokDomain: '', publicBaseUrl: ''
     };
     const secrets = ['appSecret', 'verificationToken', 'encryptKey', 'ngrokAuthtoken'];
 
@@ -43,6 +43,7 @@ window.__ModuleLoader__.load({
       const [connection, setConnection] = useState(null);
       const [connectionError, setConnectionError] = useState('');
       const [savedMode, setSavedMode] = useState('webhook');
+      const [savedProvider, setSavedProvider] = useState('ngrok');
       const [reload, setReload] = useState(0);
       const [connected, setConnected] = useState(false);
       const [secretFlags, setSecretFlags] = useState({});
@@ -53,6 +54,7 @@ window.__ModuleLoader__.load({
         secrets.forEach(key => { safe[key] = ''; });
         setConfig(safe);
         setSavedMode(safe.connectionMode);
+        setSavedProvider(safe.tunnelProvider);
         setSecretFlags(data.configured || data.secrets || value.configured || {});
       }
 
@@ -68,7 +70,7 @@ window.__ModuleLoader__.load({
       }, [reload]);
 
       async function refreshStatus() {
-        const results = await Promise.allSettled([request('webhook-url'), request('ngrok/status'), request('connection/status')]);
+        const results = await Promise.allSettled([request('webhook-url'), request('tunnel/status'), request('connection/status')]);
         if (results[0].status === 'fulfilled') setWebhook(results[0].value.url || '');
         if (results[1].status === 'fulfilled') setTunnel(results[1].value);
         setStatusError(results.slice(0, 2).filter(result => result.status === 'rejected').map(result => result.reason.message).join('；'));
@@ -79,7 +81,7 @@ window.__ModuleLoader__.load({
       }
       useEffect(() => {
         let active = true;
-        Promise.allSettled([request('webhook-url'), request('ngrok/status')]).then(results => {
+        Promise.allSettled([request('webhook-url'), request('tunnel/status')]).then(results => {
           if (!active) return;
           if (results[0].status === 'fulfilled') setWebhook(results[0].value.url || '');
           if (results[1].status === 'fulfilled') setTunnel(results[1].value);
@@ -142,6 +144,7 @@ window.__ModuleLoader__.load({
           className: primary ? 'feishu-primary' : '' }, busy === action ? '处理中…' : label);
       }
       const modeName = mode => mode === 'websocket' ? '长连接' : '开发者服务器（Webhook）';
+      const providerNames = { ngrok: 'ngrok', cloudflare: 'Cloudflare Tunnel', custom: '自定义公网地址' };
       const stateNames = {
         disabled: '未启用', starting: '正在启动', connecting: '正在连接', connected: '已连接',
         reconnecting: '正在重连', stopped: '已停止', error: '连接异常',
@@ -176,7 +179,7 @@ window.__ModuleLoader__.load({
                 connection?.message && h('p', { className: 'feishu-muted' }, connection.message),
                 connectionError && h('p', { role: 'alert', className: 'feishu-error' }, `连接状态暂不可用：${connectionError}`),
                 config.connectionMode === 'websocket' && h('p', { className: 'feishu-muted' },
-                  '长连接使用 App ID 和 App Secret，无需公网地址、ngrok、Verification Token 或 Encrypt Key。保存后由 Harness 建立连接；在飞书后台同步选择「使用长连接接收事件」，并订阅 im.message.receive_v1。'),
+                  '长连接使用 App ID 和 App Secret，无需公网地址、公网隧道、Verification Token 或 Encrypt Key。保存后由 Harness 建立连接；在飞书后台同步选择「使用长连接接收事件」，并订阅 im.message.receive_v1。'),
                 button('刷新连接状态', () => run('status', refreshStatus), 'status')),
               h('section', null,
                 h('h3', null, '应用凭证'),
@@ -194,6 +197,7 @@ window.__ModuleLoader__.load({
                   h('span', { className: 'feishu-muted' }, connected ? '凭证验证成功' : '尚未验证当前配置'))),
               h('section', null,
                 h('h3', null, '任务处理'),
+                h('p', { className: 'feishu-muted' }, '处理任务时会给原消息添加 Typing（敲键盘）表情，结束后移除。需要应用权限 im:message.reactions:write_only；请在飞书开放平台开通并发布生效。缺少权限时仍会处理消息，但无法显示状态表情。'),
                 field('workspacePath', '工作目录', { placeholder: '/path/to/workspace' }),
                 field('agentPreset', 'Agent 预设', { hint: '填写当前 Harness 已安装的预设名称，例如 standard。' }),
                 field('permissionPreset', '权限预设', { choices: [
@@ -201,7 +205,21 @@ window.__ModuleLoader__.load({
                 ] })),
               config.connectionMode === 'webhook' && h('section', null,
                 h('h3', null, 'Webhook 与公网地址'),
-                h('label', { htmlFor: `${prefix}-webhook` }, 'Webhook 地址'),
+                field('tunnelProvider', '公网接入方式', { choices: [
+                  ['ngrok', 'ngrok'], ['cloudflare', 'Cloudflare Tunnel'], ['custom', '自定义公网地址 / 反向代理']
+                ], hint: '选择后保存生效。隧道由你在本机或服务器上启动，插件不自动启动或停止。' }),
+                config.tunnelProvider !== savedProvider && h('p', { role: 'status', className: 'feishu-muted' },
+                  `公网接入方式尚未保存；已保存的方式为 ${providerNames[savedProvider]}。原公网地址会保留，请更新为所选服务提供的地址后保存。`),
+                field('publicBaseUrl', config.tunnelProvider === 'ngrok' ? '公网服务地址（可选）' : '公网服务地址', {
+                  placeholder: config.tunnelProvider === 'cloudflare' ? 'https://your-tunnel.trycloudflare.com' : 'https://your-host.example',
+                  hint: config.tunnelProvider === 'ngrok' ? '填写 HTTPS 根地址；留空时检测指向当前 Harness 端口的 ngrok 隧道。' : '填写隧道或反向代理提供的 HTTPS 根地址，不包含 /webhook/feishu；保存后生成完整回调地址。'
+                }),
+                config.tunnelProvider === 'cloudflare' && h('div', { className: 'feishu-muted' },
+                  h('p', null, '安装 cloudflared 后，可在终端启动 Quick Tunnel：'),
+                  h('code', null, Number.isInteger(config.harnessPort) && config.harnessPort > 0
+                    ? `cloudflared tunnel --url http://127.0.0.1:${config.harnessPort}` : '请先刷新页面以获取当前 Harness 端口'),
+                  h('p', null, '将终端输出的 HTTPS 地址填入上方。Quick Tunnel 地址会变化，重启后需要重新保存并更新飞书回调地址。固定域名请使用已配置的命名隧道。')),
+                h('label', { htmlFor: `${prefix}-webhook` }, '已保存配置的 Webhook 地址'),
                 h('div', { className: 'feishu-actions' },
                   h('input', { id: `${prefix}-webhook`, readOnly: true, value: webhook, placeholder: '配置公网地址后显示' }),
                   h('button', { type: 'button', disabled: !webhook || Boolean(busy), onClick: () => run('copy', async () => {
@@ -209,11 +227,12 @@ window.__ModuleLoader__.load({
                     setNotice({ text: 'Webhook 地址已复制。' });
                   }) }, '复制')),
                 h('p', { className: 'feishu-muted' }, '在飞书应用的「事件订阅」中填写公网可访问的请求地址，并添加 im.message.receive_v1 事件。'),
-                field('publicBaseUrl', '公网服务地址（可选）', { placeholder: 'https://your-host.example', hint: '使用反向代理时填写公网 HTTPS 地址；留空时尝试使用已有 ngrok 隧道。' }),
-                h('p', null, tunnel ? (tunnel.running ? `ngrok 运行中：${tunnel.url || ''}` : 'ngrok 未运行') : '尚未取得 ngrok 状态'),
+                h('p', { role: 'status' }, tunnel
+                  ? `已保存配置的公网状态（${providerNames[tunnel.provider] || tunnel.provider}）：${tunnel.state === 'not_required' ? '长连接无需隧道' : tunnel.provider === 'ngrok' ? (tunnel.running ? '已检测到 ngrok 隧道' : '未检测到 ngrok 隧道') : tunnel.state === 'configured' ? '地址已配置，连接未验证' : '地址未配置'}`
+                  : '尚未取得公网接入状态'),
                 tunnel?.message && h('p', { className: 'feishu-muted' }, tunnel.message),
                 statusError && h('p', { role: 'alert', className: 'feishu-error' }, statusError),
-                h('p', { className: 'feishu-muted' }, '如需 ngrok，请在本机启动隧道。此处读取本机已有隧道的状态。'),
+                config.tunnelProvider === 'ngrok' && h('p', { className: 'feishu-muted' }, '请在本机启动 ngrok；此处检测指向当前 Harness 端口的已有隧道。'),
                 button('刷新状态', () => run('status', refreshStatus), 'status')),
               h('div', { className: 'feishu-actions' },
                 h('button', { type: 'submit', disabled: Boolean(busy), className: 'feishu-primary' }, busy === 'save' ? '保存中…' : '保存配置'))),

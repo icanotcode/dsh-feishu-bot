@@ -91,6 +91,53 @@ async function fakeNgrok(f) {
   return { PATH: bin, ARG_OUTPUT: output };
 }
 
+async function fakeCloudflared(f) {
+  const bin = join(f.dir, 'bin');
+  await mkdir(bin);
+  const output = join(f.dir, 'cloudflare-args.json');
+  await writeFile(join(bin, 'cloudflared'), `#!${process.execPath}\nrequire('node:fs').writeFileSync(process.env.ARG_OUTPUT, JSON.stringify(process.argv.slice(2))); process.exit(Number(process.env.FAKE_EXIT || 0));\n`, { mode: 0o755 });
+  return { PATH: bin, ARG_OUTPUT: output };
+}
+
+test('Cloudflare Quick Tunnel forwards only a loopback URL and validates the port', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t);
+  const env = await fakeCloudflared(f);
+  for (const [args, port] of [[[], '3080'], [['--port', '4321'], '4321']]) {
+    const result = f.run('start-cloudflare.mjs', args, env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(await readFile(env.ARG_OUTPUT, 'utf8')), ['tunnel', '--url', `http://127.0.0.1:${port}`]);
+  }
+});
+
+test('Cloudflare named tunnel forwards existing configuration and propagates failure status', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t);
+  const env = await fakeCloudflared(f);
+  const config = join(f.dir, 'cloudflare config.yml');
+  await writeFile(config, '{}');
+  const result = f.run('start-cloudflare.mjs', ['--name', 'feishu-example', '--config', config], { ...env, FAKE_EXIT: '5' });
+  assert.equal(result.status, 5, result.stderr);
+  assert.deepEqual(JSON.parse(await readFile(env.ARG_OUTPUT, 'utf8')), ['tunnel', '--config', config, 'run', 'feishu-example']);
+});
+
+test('Cloudflare rejects malformed arguments and conflicting Quick/named options without launching', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t);
+  const env = await fakeCloudflared(f);
+  for (const args of [['--port'], ['--port', '0'], ['--port', '65536'], ['--port', '3.5'], ['--port', 'invalid'], ['--unknown'], ['--config', 'some.yml'], ['--name', '--help'], ['--name', 'bad/name'], ['--name', 'example', '--port', '3080'], ['--name', 'example', '--config', join(f.dir, 'missing.yml')]]) {
+    assert.notEqual(f.run('start-cloudflare.mjs', args, env).status, 0, JSON.stringify(args));
+  }
+  await assert.rejects(access(env.ARG_OUTPUT));
+});
+
+test('Cloudflare background startup catches early exit without claiming connection or saving a PID', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t);
+  const env = await fakeCloudflared(f);
+  const result = f.run('start-cloudflare.mjs', ['--background'], { ...env, FAKE_EXIT: '2' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /启动后退出/);
+  assert.equal(result.stdout, '');
+  await assert.rejects(access(join(f.plugin, '.runtime', 'cloudflared.pid')));
+});
+
 test('ngrok forwards explicit URL and default port without a private policy', { skip: process.platform === 'win32' }, async t => {
   const f = await fixture(t);
   const env = await fakeNgrok(f);

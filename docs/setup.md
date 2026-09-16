@@ -29,10 +29,10 @@
 
 ### 方式 A：开发者服务器（Webhook）
 
-1. 插件选择 **将事件发送至开发者服务器（Webhook）**。
+1. 插件选择 **将事件发送至开发者服务器（Webhook）**，在 **公网接入方式** 中选择 ngrok、Cloudflare Tunnel 或自定义公网地址。
 2. 在飞书后台 **事件与回调 → 加密策略** 中取得 Verification Token；如果启用了事件加密，同时取得 Encrypt Key。将这些值填写到插件并先点击 **保存配置**。
 3. 将公网 HTTPS 入口转发到 Harness 实际监听端口，默认是本机 `3080`。
-4. 在插件的 **公网服务地址（可选）** 中填写域名根地址，例如 `https://your-domain.example`，保存后复制页面显示的 **Webhook 地址**。
+4. 在插件的 **公网服务地址** 中填写域名根地址，例如 `https://your-domain.example`，保存后复制页面显示的 **Webhook 地址**。
 5. 飞书后台打开 **事件与回调 → 事件配置**，编辑订阅方式，选择 **将事件发送至开发者服务器**，填写复制的完整地址并保存。
 6. 完成下文的事件订阅、权限和应用发布，再测试真实消息。
 
@@ -45,7 +45,9 @@
 
 插件「公网服务地址」只接受 HTTPS 根地址，不接受路径、查询参数或 URL 中的用户名密码。保存请求地址时，飞书会向该地址发起验证请求，插件读取 `challenge` 并返回同一个值；启用加密时会先解密。此步骤不调用模型，不需要等待 Agent 生成答复。订阅流程可参阅 [飞书：配置事件订阅方式](https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case)。
 
-**使用本机 ngrok：**先自行安装并配置 ngrok，在插件源码目录的另一个终端运行：
+#### 使用本机 ngrok
+
+在公网接入方式中选择 **ngrok**。先自行安装并配置 ngrok，在插件源码目录的另一个终端运行：
 
 ```bash
 npm run start:ngrok -- --url https://YOUR-NGROK-DOMAIN --port 3080
@@ -55,6 +57,32 @@ npm run start:ngrok -- --url https://YOUR-NGROK-DOMAIN --port 3080
 
 插件会读取本机 `127.0.0.1:4040` 的 ngrok 隧道信息，仅选择指向当前 Harness 端口的 HTTPS 隧道。如果「公网服务地址」留空，可用检测到的隧道生成 Webhook URL。填写了公网服务地址时，以填写值为准。设置页只检测隧道，不负责启动、停止或配置 ngrok。
 
+#### 使用 Cloudflare Tunnel
+
+在公网接入方式中选择 **Cloudflare Tunnel**。先按 [Cloudflare 官方安装说明](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/) 安装 `cloudflared`，确保终端能找到该命令。
+
+临时验证可以使用 Quick Tunnel。在插件源码目录的另一个终端运行：
+
+```bash
+npm run start:cloudflare -- --port 3080
+```
+
+将启动日志中的 `https://…trycloudflare.com` 根地址填写到插件 **公网服务地址** 并保存，再将该根地址加 `/webhook/feishu` 填入飞书后台。`--port` 必须等于 Harness 实际监听端口；Quick Tunnel 退出后域名不能继续使用，下次启动获得新地址时，应同步更新插件与飞书后台。
+
+长期使用建议创建命名隧道，并把自己的域名路由到 Harness。完成 Cloudflare 账户、域名、隧道凭据和配置文件准备后，可运行现有命名隧道：
+
+```bash
+npm run start:cloudflare -- --name YOUR-TUNNEL --config /path/to/config.yml
+```
+
+`--name` 与 `--port` 不能同时使用；命名隧道的本地目标由配置文件中的 `ingress` 决定，例如 `http://127.0.0.1:3080`。插件脚本只启动现有隧道，不负责创建账户、申请域名、创建隧道或修改 DNS。部署细节见 [Cloudflare 本地管理隧道指南](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/local-management/create-local-tunnel/)。
+
+Cloudflare 模式需要手动填写公网服务地址，不读取 ngrok 检测结果，也不会在地址留空时回退到 ngrok。**保存地址只表示完成配置，不代表 Cloudflare 已运行或公网已连通。** 如有 Cloudflare Access 或其他入口策略，飞书 POST 回调必须能够到达 `/webhook/feishu`；管理页面的访问保护应继续保留。
+
+#### 使用自定义公网地址
+
+已有反向代理或其他公网 HTTPS 入口时，选择 **自定义公网地址**，填写根地址并保存。确保入口将回调路径转发到 Harness 实际端口。此方式同样不会启动代理、自动检测 ngrok 或验证公网连通性。
+
 ### 方式 B：长连接
 
 1. 插件填写 App ID 和 App Secret，选择 **使用长连接接收事件**，点击 **保存配置**。
@@ -62,7 +90,7 @@ npm run start:ngrok -- --url https://YOUR-NGROK-DOMAIN --port 3080
 3. 飞书后台打开 **事件与回调 → 事件配置**，选择 **使用长连接接收事件** 并保存。
 4. 完成下文的事件订阅、权限和应用发布，再测试真实消息。
 
-长连接由 Harness 进程维持。关闭 Harness 后就无法接收消息；重启后会根据保存的配置重新建立连接。该方式无需填写公网地址、配置 ngrok，或提供 Verification Token / Encrypt Key。
+长连接由 Harness 进程维持。关闭 Harness 后就无法接收消息；重启后会根据保存的配置重新建立连接。该方式无需填写公网地址，也不需要 ngrok、Cloudflare 或其他隧道；Verification Token / Encrypt Key 同样不需要。
 
 ## 3. 订阅事件、配置权限并发布应用
 
@@ -75,12 +103,15 @@ npm run start:ngrok -- --url https://YOUR-NGROK-DOMAIN --port 3080
 | 接收用户私聊机器人的文本 | 读取用户发给机器人的单聊消息 |
 | 接收群里 @机器人的文本 | 获取群组中用户 @机器人消息 |
 | 回复处理结果 | 以应用的身份发消息 |
+| 添加/删除敲键盘工作状态表情 | 发送、删除消息表情回复（`im:message.reactions:write_only`） |
 
 飞书可能提供多项可满足同一接口的权限，具体以当前后台提示为准。不要为了接通文本聊天，一次性申请所有文档、日历或通讯录权限。接收条件和回复权限分别见 [飞书：接收消息](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)、[飞书：回复消息](https://open.feishu.cn/document/server-docs/im-v1/message/reply)。
 
+`Typing` 工作状态表情通过主动调用飞书 API 添加和删除，不需要订阅 `im.message.reaction.created_v1` 或 `im.message.reaction.deleted_v1`。权限详情见 [飞书：添加消息表情回复](https://open.feishu.cn/document/server-docs/im-v1/message-reaction/create) 与 [删除消息表情回复](https://open.feishu.cn/document/server-docs/im-v1/message-reaction/delete)。新增权限后必须完成发布/生效流程，不能只在权限管理页面勾选。
+
 完成 **版本管理与发布** 中的创建版本、发布或审批流程，确认应用对测试用户可见。群聊测试前将机器人加入群，并 @机器人发送文本。当前插件没有独立的用户或群聊白名单，应通过飞书应用的可用范围、事件接收权限以及 Harness 权限预设控制使用范围。
 
-**「回调配置」无需为当前聊天功能添加项目。** 插件未处理 `card.action.trigger` 卡片按钮交互。机器人入群/出群、已读/撤回、表情回应、云文档评论、会议和纪要/妙记等事件也不在当前处理范围内。
+**「回调配置」无需为当前聊天功能添加项目。** 插件未处理 `card.action.trigger` 卡片按钮交互。机器人入群/出群、已读/撤回、用户表情回应事件、云文档评论、会议和纪要/妙记等事件也不在当前处理范围内。
 
 ## 4. 设置字段说明
 
@@ -94,7 +125,8 @@ npm run start:ngrok -- --url https://YOUR-NGROK-DOMAIN --port 3080
 | 工作目录 | Agent 处理飞书请求时使用的目录，必须是存在且可访问的绝对路径。请按自己的项目设置。 |
 | Agent 预设 | 当前 Harness 已安装的预设名称，默认 `standard`。 |
 | 权限预设 | 可选只读（`read-only`）、工作区写入（`workspace-write`，默认）或完全访问（`danger-full-access`）；具体可执行操作由 Harness 负责约束。 |
-| 公网服务地址 | Webhook 模式可选，填写 HTTPS 根地址；留空时尝试检测本机 ngrok 隧道。 |
+| 公网接入方式 | Webhook 下选择 ngrok（默认）、Cloudflare Tunnel 或自定义公网地址，保存后生效。长连接不需要任何隧道。 |
+| 公网服务地址 | 填写 HTTPS 根地址。仅 ngrok 模式允许留空并使用自动检测结果；Cloudflare 和自定义模式需手动填写，不会回退 ngrok。 |
 | Webhook 地址 | 只读显示，由公网服务地址和插件路径组合；复制到飞书后台的请求地址栏。 |
 
 **测试连接** 会使用当前填写的 App ID / App Secret 向飞书进行应用认证；输入留空时使用已保存值。测试成功不会保存修改，也不代表事件订阅或消息回复已经接通，仍需点击 **保存配置**。
@@ -110,8 +142,11 @@ App Secret、Verification Token、Encrypt Key 不会回显；出现「已保存�
 3. 在飞书私聊机器人发送 `请只回复：飞书连接正常`。这是一条普通文本请求，不是插件命令。
 4. 确认 Harness 出现以 `Feishu:` 开头的会话，并生成答复。
 5. 确认机器人在飞书回复了这次请求。若需要群聊，再单独测试群内 @机器人。
+6. 开通表情写权限后，用一条耗时稍长的文本任务检查原消息上的敲键盘表情是否在处理期间出现、结束后移除；快速完成的任务可能不易观察。
 
 当前每条受支持的消息会创建独立 Harness 会话，后续消息不自动继承上一条的上下文。自动接收目前只处理文本，不处理图片、文件或语音；默认在 Agent 完成后回复最终文本，没有流式进度卡片。需要较长上下文时，请在同一条文本中提供完整背景。
+
+工作状态表情默认自动启用，目前没有独立开关。任务完成、出错、取消或插件卸载时，插件会尝试移除自己添加的表情，不会删除他人的回应。状态更新失败只记录日志，不影响任务和最终答复；断网或强制终止进程可能导致表情残留。
 
 当前版本已进行单元测试和本地浏览器检查，但项目尚未完成真实飞书消息收发验收。完成上述步骤后，才能确认你自己的应用、权限、网络和模型组成的完整链路可用。
 
@@ -139,5 +174,13 @@ ngrok 也支持后台运行，日志位于 `.runtime/ngrok.log`：
 ```bash
 npm run start:ngrok -- --url https://YOUR-NGROK-DOMAIN --port 3080 --background
 ```
+
+Cloudflare 启动脚本也支持 `--background`，日志位于 `.runtime/cloudflared.log`。后台启动只表示进程没有立即退出，不表示隧道已经连通：
+
+```bash
+npm run start:cloudflare -- --port 3080 --background
+```
+
+Quick Tunnel 的公网域名仍需从日志中复制到插件，再同步飞书后台的完整回调地址。
 
 更新仓库源码后，运行 `npm ci` 和 `npm run install:harness`，再重启 Harness。若使用自定义 `DSH_HOME`，更新安装与启动时也应保持一致。

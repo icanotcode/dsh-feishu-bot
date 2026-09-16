@@ -14,19 +14,19 @@ English · [简体中文](README.md)
 
 `dsh-feishu-bot` connects a Feishu bot to DeepSeek Harness. Enable it in the Harness plugin list, then use its settings page to enter application credentials, choose how to receive events, and set a working directory for tasks.
 
-The plugin supports two connection modes: **developer server (HTTP Webhook)** and **persistent connection (WebSocket)**. Use Webhook if you have a public endpoint or an ngrok tunnel; choose WebSocket if you run Harness locally without a public endpoint. Saving the configuration applies the selected mode.
+The plugin supports two connection modes: **developer server (HTTP Webhook)** and **persistent connection (WebSocket)**. Use Webhook if you have a public endpoint, ngrok, or Cloudflare Tunnel; choose WebSocket if you run Harness locally without a public endpoint. Saving the configuration applies the selected mode.
 
 ```text
 Feishu text message → Webhook / WebSocket → Harness Agent → Reply to the original Feishu message
 ```
 
-This is an independently maintained community plugin, unaffiliated with DeepSeek or Feishu. The current version is **0.1.2**. Install it from this repository; it has not been published to npm.
+This is an independently maintained community plugin, unaffiliated with DeepSeek or Feishu. The current version is **0.1.3**. Install it from this repository; it has not been published to npm.
 
 ## Settings preview
 
-![Feishu plugin settings](assets/settings-webhook.png)
+![Feishu plugin settings](assets/settings-cloudflare.png)
 
-Actual settings UI captured in an isolated demo environment with no application credentials configured.
+Actual settings UI captured in an isolated demo environment with no application credentials configured. The screenshot shows the Cloudflare settings in 0.1.3; the example hostname does not indicate a working public tunnel.
 
 ## Current capabilities
 
@@ -35,8 +35,10 @@ Actual settings UI captured in an isolated demo environment with no application 
 | Native settings entry | Appears in the plugin list; configuration is available on the “飞书机器人” settings page |
 | Two event transports | Choose Webhook or WebSocket; saving updates the runtime configuration |
 | Text message handling | Receives `im.message.receive_v1` and creates a separate Harness session for each accepted message |
+| Working indicator | Adds a `Typing` reaction to the original message when processing starts and attempts to remove it when processing ends; reaction failures do not block the task or reply |
 | Automatic replies | Replies to the original message with the Agent's final text; splits long replies into multiple messages |
 | Webhook verification | Handles URL verification, Verification Token checks, encrypted payload decryption, and signature verification |
+| Public endpoints | Webhook supports ngrok, Cloudflare Tunnel, or a custom HTTPS address; start the tunnel separately |
 | Connection checks | Tests application credentials, displays WebSocket connection status, and detects local ngrok tunnels |
 | Feishu tools | Registers `feishu_*` tools for the Agent; availability depends on application permissions and access to the target resources |
 
@@ -91,7 +93,7 @@ Enter your App ID, App Secret, the absolute path to an existing working director
 | Item | Developer server (Webhook) | Persistent connection (WebSocket) |
 | --- | --- | --- |
 | Connection direction | Feishu pushes events to a public HTTPS endpoint | Your machine initiates a connection to Feishu |
-| Public URL / ngrok | Requires a reachable HTTPS endpoint; ngrok is one option | Not required |
+| Public URL / tunnel | Requires a reachable HTTPS endpoint via ngrok, Cloudflare Tunnel, or a custom address | No tunnel required |
 | Application credentials | App ID and App Secret | App ID and App Secret |
 | Callback verification | Verification Token; Encrypt Key is also needed when encryption is enabled | Token / Encrypt Key not required |
 | Feishu console subscription method | Send events to a developer server | Receive events through a persistent connection |
@@ -102,7 +104,15 @@ Both modes require subscribing to **Receive message (`im.message.receive_v1`)**,
 - **Webhook:** enter `https://your-domain.example` in the plugin's “公网服务地址” field. Save the verification credentials first, then enter the full URL `https://your-domain.example/webhook/feishu` in the Feishu console.
 - **WebSocket:** save the application credentials and connection mode. Wait for the plugin to show that it is connected, then select persistent connection in the Feishu console and configure the event subscription.
 
-See the **[Feishu setup guide (Chinese)](docs/setup.md)** for field descriptions, permissions, ngrok commands, and the configuration sequence.
+To start a Cloudflare Quick Tunnel in another terminal, install `cloudflared` first, then run:
+
+```bash
+npm run start:cloudflare -- --port 3080
+```
+
+Select **Cloudflare Tunnel** in the plugin, copy the generated `https://…trycloudflare.com` root URL from the log into “公网服务地址”, and save. Add `/webhook/feishu` when entering the URL in the Feishu console. Quick Tunnel URLs change between runs; use a named tunnel for a stable setup. Selecting a provider or saving an address does not start a tunnel or verify public reachability.
+
+See the **[Feishu setup guide (Chinese)](docs/setup.md)** for field descriptions, permissions, commands for both tunnel providers, and the configuration sequence.
 
 ### 4. Verify your first reply
 
@@ -115,6 +125,7 @@ A successful credential test confirms application authentication. Saving the req
 | Setting | Default behavior |
 | --- | --- |
 | Connection mode | `webhook` |
+| Public endpoint provider | `ngrok`; Webhook settings also offer Cloudflare Tunnel and a custom public URL |
 | Callback path | `/webhook/feishu` |
 | Agent preset | `standard`; it must already be installed in Harness |
 | Permission preset | `workspace-write`; you can select other presets, such as read-only, in the settings page |
@@ -129,7 +140,7 @@ The bot executes requests using the selected working directory and permissions. 
 
 The chat entry point currently supports text messages and final text replies. It does not yet support image/file input, streaming output, conversation continuity across messages, or plugin slash commands. Message deduplication and reply associations are held in process memory; restarting does not restore undelivered replies.
 
-Apart from `im.message.receive_v1`, the plugin does not handle bot join/leave events, message read/recall events, reactions, cloud document comments, or meeting/notes/minutes events. **`card.action.trigger` card button callbacks** and scheduled task execution are also not implemented. There is no need to subscribe to these extra events for this plugin.
+Apart from `im.message.receive_v1`, the plugin does not handle bot join/leave events, message read/recall events, user reaction events, cloud document comments, or meeting/notes/minutes events. **`card.action.trigger` card button callbacks** and scheduled task execution are also not implemented. There is no need to subscribe to these extra events for this plugin. Adding/removing the `Typing` indicator does not require a reaction event subscription; it requires `im:message.reactions:write_only`. Publish/activate the updated app permissions in Feishu before testing. See the setup guide.
 
 Unit tests and local browser checks are in place. **End-to-end acceptance testing with real Feishu messages has not yet been completed.** You are welcome to try the setup guide and report your environment, reproduction steps, and sanitized logs.
 
@@ -151,7 +162,7 @@ npm ci
 npm run install:harness
 ```
 
-Run `npm test` for local verification. Read the [contribution guide (Chinese)](CONTRIBUTING.md) before reporting a problem or proposing an improvement. A [community introduction draft (Chinese)](docs/community-introduction.md) is available if you want to share the plugin.
+See the [changelog (Chinese)](CHANGELOG.md) for release changes. Run `npm test` for local verification. Read the [contribution guide (Chinese)](CONTRIBUTING.md) before reporting a problem or proposing an improvement. A [community introduction draft (Chinese)](docs/community-introduction.md) is available if you want to share the plugin.
 
 ## License and reference
 

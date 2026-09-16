@@ -16,7 +16,7 @@ async function fixture(t, initial = {}) {
   let component;
   let plugin;
   let timerId = 0;
-  let saved = { connectionMode: 'webhook', appId: 'cli_example', configured: { appSecret: true, verificationToken: true }, ...initial };
+  let saved = { connectionMode: 'webhook', tunnelProvider: 'ngrok', harnessPort: 4321, appId: 'cli_example', configured: { appSecret: true, verificationToken: true }, ...initial };
   let runtime = { mode: saved.connectionMode, state: saved.connectionMode === 'webhook' ? 'listening' : 'connected', message: '' };
   const React = {
     Fragment: 'fragment',
@@ -45,8 +45,8 @@ async function fixture(t, initial = {}) {
       }
       const data = url.endsWith('/config') ? saved
         : url.endsWith('/connection/status') ? runtime
-          : url.endsWith('/webhook-url') ? { url: 'https://example.ngrok.app/webhook/feishu' }
-            : { running: true, url: 'https://example.ngrok.app' };
+          : url.endsWith('/webhook-url') ? { url: saved.connectionMode === 'websocket' ? null : saved.publicBaseUrl ? `${saved.publicBaseUrl}/webhook/feishu` : saved.tunnelProvider === 'ngrok' ? 'https://example.ngrok.app/webhook/feishu' : null }
+            : { provider: saved.tunnelProvider, state: saved.connectionMode === 'websocket' ? 'not_required' : saved.tunnelProvider === 'ngrok' ? 'detected' : saved.publicBaseUrl ? 'configured' : 'unconfigured', running: saved.tunnelProvider === 'ngrok' ? true : null, url: saved.publicBaseUrl || null, port: 4321 };
       return { ok: true, status: 200, json: async () => data };
     },
     setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
@@ -117,7 +117,39 @@ test('connection polling updates runtime without resetting draft edits and is ca
   assert.match(f.text(), /当前运行：长连接 · 正在重连/);
   assert.equal(f.field('appId').props.value, 'cli_unsaved');
   assert.equal(f.timers.size, 1);
-  assert.equal(f.requests.filter(request => request.url.endsWith('/ngrok/status')).length, 1);
+  assert.equal(f.requests.filter(request => request.url.endsWith('/tunnel/status')).length, 1);
   f.dispose();
   assert.equal(f.timers.size, 0);
+});
+
+test('Cloudflare draft shows the actual Harness port while distinguishing saved provider and callback', async t => {
+  const f = await fixture(t);
+  f.edit('tunnelProvider', 'cloudflare');
+  assert.match(f.text(), /cloudflared tunnel --url http:\/\/127\.0\.0\.1:4321/);
+  assert.match(f.text(), /公网接入方式尚未保存/);
+  assert.match(f.text(), /原公网地址会保留/);
+  assert.match(f.text(), /已保存配置的公网状态（ngrok）/);
+  assert.equal(f.field('webhook').props.value, 'https://example.ngrok.app/webhook/feishu');
+  f.edit('publicBaseUrl', 'https://random.trycloudflare.com');
+  f.nodes().find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+  await f.settle();
+  const post = JSON.parse(f.requests.find(request => request.method === 'POST').body);
+  assert.equal(post.tunnelProvider, 'cloudflare');
+  assert.equal(post.publicBaseUrl, 'https://random.trycloudflare.com');
+  assert.match(f.text(), /已保存配置的公网状态（Cloudflare Tunnel）：地址已配置，连接未验证/);
+  assert.doesNotMatch(f.text(), /公网接入方式尚未保存|ngrok 未运行|已检测到 ngrok 隧道/);
+  assert.equal(f.field('webhook').props.value, 'https://random.trycloudflare.com/webhook/feishu');
+  assert.equal(f.requests.some(request => request.url.endsWith('/ngrok/status')), false);
+});
+
+test('Cloudflare and custom show unconfigured addresses, and websocket hides tunnel controls', async t => {
+  const f = await fixture(t, { tunnelProvider: 'cloudflare' });
+  assert.match(f.text(), /Cloudflare Tunnel）：地址未配置/);
+  assert.equal(f.field('webhook').props.value, '');
+  assert.doesNotMatch(f.text(), /ngrok 未运行/);
+  f.edit('tunnelProvider', 'custom');
+  assert.doesNotMatch(f.text(), /cloudflared tunnel --url/);
+  f.edit('connectionMode', 'websocket');
+  assert.equal(f.field('tunnelProvider'), undefined);
+  assert.equal(f.field('publicBaseUrl'), undefined);
 });

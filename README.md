@@ -14,19 +14,19 @@
 
 `dsh-feishu-bot` 是 DeepSeek Harness 的飞书机器人插件。在 Harness 的插件列表中启用后，即可通过设置页填写应用凭据、选择事件接收方式和任务工作目录。
 
-插件提供 **开发者服务器（HTTP Webhook）** 和 **长连接（WebSocket）** 两种接入方式：已有公网地址或 ngrok 的用户可以使用 Webhook；只在本机运行、没有公网入口的用户可以选择长连接。保存配置后切换生效。
+插件提供 **开发者服务器（HTTP Webhook）** 和 **长连接（WebSocket）** 两种接入方式：已有公网地址、ngrok 或 Cloudflare Tunnel 的用户可以使用 Webhook；只在本机运行、没有公网入口的用户可以选择长连接。保存配置后切换生效。
 
 ```text
 飞书文本消息 → Webhook / 长连接 → Harness Agent → 回复原飞书消息
 ```
 
-这是独立维护的社区插件，与 DeepSeek、飞书无隶属关系。当前版本为 **0.1.2**，通过本仓库源码安装；尚未发布到 npm。
+这是独立维护的社区插件，与 DeepSeek、飞书无隶属关系。当前版本为 **0.1.3**，通过本仓库源码安装；尚未发布到 npm。
 
 ## 设置界面
 
-![飞书插件设置界面](assets/settings-webhook.png)
+![飞书插件设置界面](assets/settings-cloudflare.png)
 
-实际设置界面，拍摄于独立演示环境，未填写应用凭据。
+实际设置界面，拍摄于独立演示环境，未填写应用凭据。截图展示 0.1.3 的 Cloudflare 接入配置，示例域名不代表公网连通。
 
 ## 当前能力
 
@@ -35,8 +35,10 @@
 | 原生设置入口 | 在插件列表中显示，在「飞书机器人」设置页管理配置 |
 | 两种接收方式 | Webhook 与长连接二选一，保存后更新运行状态 |
 | 文本消息处理 | 接收 `im.message.receive_v1`，为每条有效消息创建独立 Harness 会话 |
+| 工作状态 | 开始处理时在原消息添加敲键盘表情回应（`Typing`），结束时尝试清除；状态更新失败不阻断任务或答复 |
 | 自动答复 | Agent 完成后向原消息回复最终文本，较长回复分段发送 |
 | Webhook 验证 | 处理地址验证、Verification Token、加密请求解密和签名校验 |
+| 公网接入 | Webhook 可选 ngrok、Cloudflare Tunnel 或自定义 HTTPS 地址；隧道需另行启动 |
 | 连接检查 | 测试应用凭据、显示长连接状态、检测本机 ngrok 隧道 |
 | 飞书工具 | 为 Agent 注册 `feishu_*` 工具；实际可调用范围取决于应用权限和资源授权 |
 
@@ -91,7 +93,7 @@ npm run start:harness
 | 项目 | 开发者服务器（Webhook） | 长连接（WebSocket） |
 | --- | --- | --- |
 | 连接方向 | 飞书向公网 HTTPS 地址推送 | 本机主动连接飞书 |
-| 公网地址 / ngrok | 需要可达的 HTTPS 入口；ngrok 是一种选择 | 不需要 |
+| 公网地址 / 隧道 | 需要可达的 HTTPS 入口；可选 ngrok、Cloudflare Tunnel 或自定义地址 | 不需要任何隧道 |
 | 应用凭据 | App ID、App Secret | App ID、App Secret |
 | 回调验证配置 | Verification Token；启用加密时还需 Encrypt Key | 不需要 Token / Encrypt Key |
 | 飞书后台订阅方式 | 将事件发送至开发者服务器 | 使用长连接接收事件 |
@@ -102,7 +104,15 @@ npm run start:harness
 - **Webhook**：插件「公网服务地址」填 `https://your-domain.example`，先保存验证凭据，再在飞书后台填写完整地址 `https://your-domain.example/webhook/feishu`。
 - **长连接**：保存应用凭据与接收方式，等插件显示已连接，再在飞书后台选择长连接并配置事件。
 
-完整字段解释、飞书权限、ngrok 命令和配置顺序见 **[飞书接入指南](docs/setup.md)**。
+Cloudflare Quick Tunnel 可在另一个终端启动（需先安装 `cloudflared`）：
+
+```bash
+npm run start:cloudflare -- --port 3080
+```
+
+在插件选择 **Cloudflare Tunnel**，将日志中生成的 `https://…trycloudflare.com` 根地址填入「公网服务地址」并保存。飞书后台使用该地址加 `/webhook/feishu`。Quick Tunnel 域名会变化，长期使用建议配置命名隧道。选择或保存地址不会自动启动隧道，也不会验证公网连通性。
+
+完整字段解释、飞书权限、两种隧道命令和配置顺序见 **[飞书接入指南](docs/setup.md)**。
 
 ### 4. 验证第一次回复
 
@@ -115,6 +125,7 @@ npm run start:harness
 | 配置 | 默认行为 |
 | --- | --- |
 | 接收方式 | `webhook` |
+| 公网接入方式 | `ngrok`；可在 Webhook 设置中改为 Cloudflare Tunnel 或自定义公网地址 |
 | 回调路径 | `/webhook/feishu` |
 | Agent 预设 | `standard`，需已在 Harness 中安装 |
 | 权限预设 | `workspace-write`；可在设置页选择只读等其他预设 |
@@ -129,7 +140,7 @@ npm run start:harness
 
 当前聊天入口支持文本消息和最终文本回复，暂不提供图片/文件输入、流式输出、按聊天延续的多轮会话或插件斜杠命令。消息去重和回复关联保存在进程内存中，重启后不会恢复未交付的答复。
 
-除 `im.message.receive_v1` 外，尚未处理机器人入群/出群、消息已读/撤回、reaction、云文档评论、会议/纪要/妙记事件；也未实现 **`card.action.trigger` 卡片按钮回调** 或定时任务执行器。这些事件无需为本插件额外订阅。
+除 `im.message.receive_v1` 外，尚未处理机器人入群/出群、消息已读/撤回、用户 reaction 事件、云文档评论、会议/纪要/妙记事件；也未实现 **`card.action.trigger` 卡片按钮回调** 或定时任务执行器。这些事件无需为本插件额外订阅。主动添加/清除 `Typing` 工作状态表情不需要订阅 reaction 事件，需开通 `im:message.reactions:write_only` 并完成飞书应用权限发布，见接入指南。
 
 已有单元测试和本地浏览器检查；**真实飞书消息收发尚未完成验收**。欢迎按接入指南进行试用并反馈环境、复现步骤和脱敏日志。
 
@@ -151,7 +162,7 @@ npm ci
 npm run install:harness
 ```
 
-本地验证命令为 `npm test`。提交问题或改进前可阅读 [贡献说明](CONTRIBUTING.md)。需要向社区介绍本插件时，可使用 [社区介绍文案](docs/community-introduction.md)。
+版本变更见 [更新日志](CHANGELOG.md)。本地验证命令为 `npm test`。提交问题或改进前可阅读 [贡献说明](CONTRIBUTING.md)。需要向社区介绍本插件时，可使用 [社区介绍文案](docs/community-introduction.md)。
 
 ## 许可与参考
 
