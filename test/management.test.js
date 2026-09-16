@@ -20,6 +20,7 @@ async function fixture(t, values = new Map(), hooks = {}) {
   const config = { configFile: join(dir, 'settings.json'), path: '/webhook/feishu', workspacePath: dir, agentPreset: 'standard', permissionPreset: 'workspace-write' };
   const client = { cachedToken: 'old-token', tokenExpireTime: 999999 };
   const service = await createManagement(ctx, config, client, hooks);
+  t.after(async () => { for (const dispose of disposers.reverse()) await dispose?.(); });
   const request = async (path, method = 'GET', body, headers = {}) => {
     const req = Readable.from(body === undefined ? [] : [typeof body === 'string' ? body : JSON.stringify(body)]);
     req.method = method;
@@ -53,7 +54,7 @@ test('configuration persists across recreation, keeps blank secrets and never re
 
 test('all management routes reject untrusted requests before reads or writes', async t => {
   const f = await fixture(t);
-  for (const path of ['/config', '/test', '/ngrok/start', '/ngrok/stop', '/ngrok/status', '/tunnel/status', '/webhook-url', '/connection/status']) {
+  for (const path of ['/config', '/test', '/ngrok/start', '/ngrok/stop', '/ngrok/status', '/tunnel/status', '/tunnel/start', '/tunnel/stop', '/webhook-url', '/connection/status']) {
     const result = await f.request(path, 'POST', { appSecret: 'must-not-save' }, { host: 'public-tunnel.example' });
     assert.equal(result.status, 403);
   }
@@ -73,12 +74,12 @@ test('Cloudflare and custom providers persist without ngrok fallback or unverifi
   for (const provider of ['cloudflare', 'custom']) {
     assert.equal((await f.request('/config', 'POST', { tunnelProvider: provider, publicBaseUrl: '' })).status, 200);
     assert.equal(await f.service.getWebhookUrl(), null);
-    assert.equal((await f.request('/tunnel/status')).body.state, 'unconfigured');
+    assert.equal((await f.request('/tunnel/status')).body.state, provider === 'custom' ? 'unconfigured' : 'idle');
     assert.equal((await f.request('/config', 'POST', { publicBaseUrl: 'https://tunnel.example/' })).status, 200);
     const status = (await f.request('/tunnel/status')).body;
     assert.equal(status.provider, provider);
-    assert.equal(status.state, 'configured');
-    assert.equal(status.running, null);
+    assert.equal(status.state, provider === 'custom' ? 'configured' : 'idle');
+    assert.equal(status.running, provider === 'custom' ? null : false);
     assert.equal(status.port, 4567);
     assert.equal(status.managed, false);
     assert.equal((await f.request('/config')).body.harnessPort, 4567);
@@ -127,7 +128,7 @@ test('connection test uses saved credentials, has a deadline and does not return
   assert.ok(!JSON.stringify(result).includes('never-return-token'));
 });
 
-test('ngrok reports only real matching tunnels and external process control fails explicitly', async t => {
+test('ngrok reports matching external tunnels without duplicating or stopping their process', async t => {
   const f = await fixture(t);
   t.mock.method(globalThis, 'fetch', async () => ({ ok: true, json: async () => ({ tunnels: [
     { public_url: 'https://wrong.example.com', config: { addr: 'http://localhost:9000' } },
@@ -135,8 +136,81 @@ test('ngrok reports only real matching tunnels and external process control fail
   ] }) }));
   assert.equal((await f.service.getNgrokStatus()).url, 'https://right.example.com');
   assert.equal(await f.service.getWebhookUrl(), 'https://right.example.com/webhook/feishu');
-  assert.equal((await f.service.startNgrok()).success, false);
-  assert.equal((await f.service.stopNgrok()).success, false);
+  const started = await f.service.startNgrok();
+  assert.equal(started.success, true);
+  assert.equal(started.status.managed, false);
+  assert.equal(started.status.state, 'external');
+  const stopped = await f.service.stopNgrok();
+  assert.equal(stopped.status.managed, false);
+  assert.equal(stopped.status.running, true);
+  assert.match(stopped.message, /外部/);
+});
+
+test('tunnel controls use saved settings, preserve booleans and paths, and never expose tokens', async t => {
+  const calls = [];
+  let f;
+  const supervisor = {
+    reconcile: async () => calls.push(['reconcile', f.config.tunnelAutoRestart]),
+    start: async (...args) => { calls.push(['start', args, f.config.tunnelProvider]); return { state: 'starting', managed: true, message: 'starting' }; },
+    stop: async () => { calls.push(['stop']); return { state: 'idle', paused: true, managed: false }; },
+    status: async () => ({ provider: f.config.tunnelProvider, managed: true, state: 'running', url: 'https://actual.trycloudflare.com' }),
+    dispose: async () => calls.push(['dispose']),
+  };
+  f = await fixture(t, new Map(), { tunnelSupervisor: supervisor });
+  assert.equal((await f.service.getConfig()).tunnelAutoRestart, false);
+  assert.equal((await f.service.getConfig()).capabilities.tunnelProcessControl, true);
+  const body = { tunnelAutoRestart: true, tunnelProvider: 'cloudflare', cloudflareMode: 'named',
+    cloudflareTunnelName: 'my-bot', cloudflareConfigFile: join(f.dir, 'tunnel config.yml'),
+    ngrokTrafficPolicyFile: '~/.config/ngrok/policy.yaml', ngrokAuthtoken: 'secret-ngrok-value' };
+  assert.equal((await f.request('/config', 'POST', body)).status, 200);
+  const saved = JSON.parse(await readFile(f.config.configFile, 'utf8'));
+  assert.equal(saved.tunnelAutoRestart, true);
+  assert.equal(saved.cloudflareConfigFile, body.cloudflareConfigFile);
+  assert.equal(JSON.stringify(saved).includes('secret-ngrok-value'), false);
+  assert.equal((await f.service.getConfig()).ngrokAuthtoken, '');
+  assert.equal((await f.request('/tunnel/start', 'POST', { provider: 'ngrok', command: 'arbitrary', port: 80 })).body.success, true);
+  assert.deepEqual(calls.at(-1), ['start', [], 'cloudflare']);
+  assert.equal((await f.request('/tunnel/stop', 'POST', {})).body.status.paused, true);
+  await f.service.updateConfig({ cloudflareMode: 'quick', publicBaseUrl: 'https://old.trycloudflare.com' });
+  assert.equal(await f.service.getWebhookUrl(), 'https://actual.trycloudflare.com/webhook/feishu');
+  await f.service.updateConfig({ tunnelAutoRestart: false });
+  assert.equal(calls.at(-1)[1], false);
+  assert.equal(calls.filter(([name]) => name === 'stop').length, 1, 'saving the switch delegates reconciliation, not an implicit stop');
+  await f.service.updateConfig({ tunnelProvider: 'ngrok' });
+  const startsBefore = calls.filter(([name]) => name === 'start').length;
+  const switching = f.service.updateConfig({ tunnelProvider: 'cloudflare' });
+  const legacyStart = f.service.startNgrok();
+  await switching;
+  assert.equal((await legacyStart).success, false, 'legacy route validates the provider after queued saves');
+  assert.equal(calls.filter(([name]) => name === 'start').length, startsBefore);
+});
+
+test('invalid tunnel settings are rejected before saves, secret changes or reconciliation', async t => {
+  let reconciles = 0;
+  const f = await fixture(t, new Map(), { tunnelSupervisor: { reconcile: async () => reconciles++, dispose: async () => {} } });
+  for (const input of [
+    { tunnelAutoRestart: 'true' }, { tunnelAutoRestart: 1 }, { cloudflareMode: 'remote' },
+    { cloudflareTunnelName: 'name --token secret' }, { cloudflareConfigFile: './relative.yml' },
+    { ngrokExecutablePath: 'ngrok --config evil' }, { ngrokTrafficPolicyFile: '/tmp/a\nb' },
+  ]) {
+    assert.equal((await f.request('/config', 'POST', { ...input, ngrokAuthtoken: 'must-not-save' })).status, 400);
+  }
+  assert.equal(f.config.tunnelAutoRestart, false);
+  assert.equal(f.values.size, 0);
+  assert.equal(reconciles, 0);
+});
+
+test('ngrok detection distinguishes absent agent, unknown state and a different upstream', async t => {
+  const f = await fixture(t);
+  t.mock.method(globalThis, 'fetch', async () => { throw Object.assign(new Error('refused'), { cause: { code: 'ECONNREFUSED' } }); });
+  assert.equal((await f.service.getNgrokStatus()).unknown, false);
+  globalThis.fetch.mock.mockImplementation(async () => { throw Object.assign(new Error('timeout'), { name: 'TimeoutError' }); });
+  assert.equal((await f.service.getNgrokStatus()).unknown, true);
+  globalThis.fetch.mock.mockImplementation(async () => ({ ok: true, json: async () => ({ tunnels: [{ public_url: 'https://other.example', config: { addr: 'http://localhost:3080' } }] }) }));
+  f.config.publicBaseUrl = 'https://expected.example';
+  const status = await f.service.getNgrokStatus();
+  assert.equal(status.running, false);
+  assert.equal(status.reachable, true);
 });
 
 test('validation rejects invalid directory and environment override without partial config mutation', async t => {

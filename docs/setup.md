@@ -59,7 +59,7 @@ npm run start:ngrok -- --url https://YOUR-NGROK-DOMAIN --port 3080
 
 设置页会显示只读的「当前 Harness 监听端口」，并用实际端口生成 ngrok / Cloudflare 启动命令，端口不固定为 `3080`。例如要改为 `4321`，先停止原 Harness 实例，再运行 `npm run start:harness -- --port 4321`，同时把隧道的目标端口改为 `4321`。插件共用 Harness 的 HTTP 服务，没有独立监听端口；仅修改隧道端口或保存插件设置不会移动该服务。
 
-插件会读取本机 `127.0.0.1:4040` 的 ngrok 隧道信息，仅选择指向当前 Harness 端口的 HTTPS 隧道。如果「公网服务地址」留空，可用检测到的隧道生成 Webhook URL。填写了公网服务地址时，以填写值为准。设置页只检测隧道，不负责启动、停止或配置 ngrok。
+插件会读取本机 `127.0.0.1:4040` 的 ngrok 隧道信息，仅选择指向当前 Harness 端口的 HTTPS 隧道。如果「公网服务地址」留空，可用检测到的隧道生成 Webhook URL。填写了公网服务地址时，以填写值为准。设置页可启动和守护 ngrok，也可继续使用手动启动的外部进程。检测还会匹配已填写的公网域名，避免把另一个隧道误报为可用。
 
 #### 使用 Cloudflare Tunnel
 
@@ -81,7 +81,28 @@ npm run start:cloudflare -- --name YOUR-TUNNEL --config /path/to/config.yml
 
 `--name` 与 `--port` 不能同时使用；命名隧道的本地目标由配置文件中的 `ingress` 决定，例如 `http://127.0.0.1:3080`。插件脚本只启动现有隧道，不负责创建账户、申请域名、创建隧道或修改 DNS。部署细节见 [Cloudflare 本地管理隧道指南](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/local-management/create-local-tunnel/)。
 
-Cloudflare 模式需要手动填写公网服务地址，不读取 ngrok 检测结果，也不会在地址留空时回退到 ngrok。**保存地址只表示完成配置，不代表 Cloudflare 已运行或公网已连通。** 如有 Cloudflare Access 或其他入口策略，飞书 POST 回调必须能够到达 `/webhook/feishu`；管理页面的访问保护应继续保留。
+外部 Cloudflare 隧道和固定域名模式需填写公网服务地址；插件托管的 Quick Tunnel 可从启动输出识别本次 URL，不读取或回退到 ngrok。**保存地址只表示完成配置，不代表 Cloudflare 已运行或公网已连通。** 如有 Cloudflare Access 或其他入口策略，飞书 POST 回调必须能够到达 `/webhook/feishu`；管理页面的访问保护应继续保留。
+
+#### 隧道守护与一键启动
+
+在公网接入设置中填写对应程序参数，保存后点击 **启动当前端口的隧道**。未保存的隧道草稿会禁用启动按钮，避免启动错误的接入商或地址。程序需预先安装；留空程序路径时从 PATH 查找，也可填写带空格的本机绝对路径，Windows 选择原生 `.exe`，不要填写整条命令或 `.cmd`/`.bat`/`.ps1`。
+
+| 设置 | 行为 |
+| --- | --- |
+| 隧道守护 | 默认关闭；开启并保存后启动缺失隧道，退出或持续无法连接时退避重试，间隔上限 60 秒 |
+| ngrok Traffic Policy 文件 | 显式文件必须可读取；留空探测 `~/.config/ngrok/policy.yaml`，原策略保持不变 |
+| ngrok Authtoken | 可选；留空保留已保存凭据，程序也可使用自己的已登录配置；不会回显或加入命令参数 |
+| Cloudflare 临时隧道 | 转发至当前 Harness 端口，面板显示生成的 `trycloudflare.com` 地址；变化后重新填写飞书回调 |
+| Cloudflare 固定命名隧道 | 填隧道名称/UUID、本地 YAML 配置文件和公网根地址；本地配置需已有 `credentials-file` 及匹配域名的 HTTP ingress |
+| 程序路径 | 各平台对应的 ngrok / cloudflared 原生程序绝对路径；留空使用 PATH |
+
+固定命名隧道会生成私有临时配置副本，仅替换匹配公网域名的本机 HTTP 上游端口，保留原规则及原始配置文件。首次需自行创建隧道、凭据和 DNS；仅有 Dashboard tunnel token 的远程管理方式暂不支持。配置文件内相对 `credentials-file` 路径相对于原配置文件目录解析。
+
+关闭守护不关闭现有隧道。点击 **停止托管隧道** 会停止插件拥有的进程并暂停自动重试；点击启动，或将守护关闭保存后重新开启保存，可恢复。切换接入商、长连接模式或关键隧道配置时，会停止不再适用的托管进程。Harness 正常退出时停止自身托管隧道，守护不会在 Harness 退出后继续运行。
+
+检测到已有匹配的 ngrok 隧道时不会重复启动，也不会杀掉外部进程；开启守护后若它消失，可启动插件自己的进程。已有但不匹配端口/域名的 ngrok、或检测超时，会明确提示，避免盲目重复启动。Cloudflare 没有等价的通用外部进程检测：已有外部 Cloudflare 进程请继续在原终端或系统服务中管理，不要重复点击启动。
+
+面板显示启动中、已检测/已连接、等待重试、失败及暂停状态。ngrok 本地 API 反映隧道登记状态；Cloudflare 依据连接日志更新状态，二者都不替代飞书回调验证。公网接入为“自定义”或使用 WebSocket 时无需启动守护隧道。
 
 #### 使用自定义公网地址
 
@@ -132,7 +153,7 @@ Cloudflare 模式需要手动填写公网服务地址，不读取 ngrok 检测�
 | Agent 预设 | 当前 Harness 已安装的预设名称，默认 `standard`。 |
 | 权限预设 | 仅支持只读（`read-only`）和工作区写入（`workspace-write`，默认）；禁止完全访问。远程会话仅开放受限文件工具与历史工具，无任意 Shell、通用 MCP 或跨用户飞书 API。 |
 | 公网接入方式 | Webhook 下选择 ngrok（默认）、Cloudflare Tunnel 或自定义公网地址，保存后生效。长连接不需要任何隧道。 |
-| 公网服务地址 | 填写 HTTPS 根地址。仅 ngrok 模式允许留空并使用自动检测结果；Cloudflare 和自定义模式需手动填写，不会回退 ngrok。 |
+| 公网服务地址 | 填写 HTTPS 根地址。ngrok 可留空使用自动检测结果；插件托管的 Cloudflare Quick Tunnel 显示本次生成地址；固定域名、外部 Cloudflare 和自定义模式需填写。 |
 | Webhook 地址 | 只读显示，由公网服务地址和插件路径组合；复制到飞书后台的请求地址栏。 |
 
 **测试连接** 会使用当前填写的 App ID / App Secret 向飞书进行应用认证；输入留空时使用已保存值。测试成功不会保存修改，也不代表事件订阅或消息回复已经接通，仍需点击 **保存配置**。

@@ -38,7 +38,7 @@ Actual settings UI captured in an isolated demo environment with no application 
 | Working indicator | Adds a `Typing` reaction to the original message when processing starts and attempts to remove it when processing ends; reaction failures do not block the task or reply |
 | Automatic replies | Replies to the original message with the Agent's final text; splits long replies into multiple messages |
 | Webhook verification | Handles URL verification, Verification Token checks, encrypted payload decryption, and signature verification |
-| Public endpoints | Webhook supports ngrok, Cloudflare Tunnel, or a custom HTTPS address; start the tunnel separately |
+| Public endpoints | Webhook supports ngrok, Cloudflare Tunnel, or a custom HTTPS address; ngrok / Cloudflare can be launched and supervised from the panel |
 | Connection checks | Tests application credentials, displays WebSocket connection status, and detects local ngrok tunnels |
 | User access | Feishu app availability controls access; each user must provide and confirm a name before tasks, with no prefilled `open_id` or name list |
 | User isolation | Separate user workspaces and SQLite databases, with separate context per chat; identical names do not merge data |
@@ -118,9 +118,19 @@ To start a Cloudflare Quick Tunnel in another terminal, install `cloudflared` fi
 npm run start:cloudflare -- --port 3080
 ```
 
-Select **Cloudflare Tunnel** in the plugin, copy the generated `https://…trycloudflare.com` root URL from the log into “公网服务地址”, and save. Add `/webhook/feishu` when entering the URL in the Feishu console. Quick Tunnel URLs change between runs; use a named tunnel for a stable setup. Selecting a provider or saving an address does not start a tunnel or verify public reachability.
+Select **Cloudflare Tunnel** in the plugin, copy the generated `https://…trycloudflare.com` root URL from the log into “公网服务地址”, and save. Add `/webhook/feishu` when entering the URL in the Feishu console. Quick Tunnel URLs change between runs; use a named tunnel for a stable setup. The plugin panel can also launch and supervise the tunnel. Saving an address alone does not verify public reachability.
 
 See the **[Feishu setup guide (Chinese)](docs/setup.md)** for field descriptions, permissions, commands for both tunnel providers, and the configuration sequence.
+
+### Start and supervise tunnels
+
+Install the native ngrok or cloudflared binary for Linux, Windows or macOS, then use PATH or set an absolute executable path in the plugin. Save the provider settings and click **启动当前端口的隧道**. The actual Harness port is used; no Bash alias is involved.
+
+The **隧道守护** switch takes effect after saving. It starts a missing tunnel and retries unexpected exits with backoff capped at 60 seconds. Turning it off disables retries without stopping a running child. **停止托管隧道** stops only the plugin-owned child and pauses supervision until manual start or an off/save/on/save cycle. This supervisor runs inside Harness, not as an OS service; shutdown cleans up its own child processes.
+
+ngrok supports an explicit Traffic Policy path or auto-detects `~/.config/ngrok/policy.yaml` without editing it. Matching external ngrok tunnels are detected and never terminated by the plugin. Cloudflare supports Quick Tunnels and existing **locally managed named tunnels** with a local YAML file, credentials and DNS already configured. A private temporary copy updates the matching hostname's local service to the current Harness port; the original file is preserved. Dashboard token-only remotely managed tunnels are not supported by this launcher.
+
+Quick Tunnel addresses may change after restart: update the Feishu callback URL when that happens. A running process or registered tunnel does not prove Feishu callback delivery. See the setup guide for field descriptions and troubleshooting.
 
 ### 4. Verify your first reply
 

@@ -51,9 +51,14 @@ window.__ModuleLoader__.load({
       connectionMode: 'webhook', appId: '', appSecret: '', verificationToken: '', encryptKey: '',
       workspacePath: '', agentPreset: 'standard', permissionPreset: 'workspace-write',
       tunnelProvider: 'ngrok', ngrokAuthtoken: '', ngrokDomain: '', publicBaseUrl: '',
+      tunnelAutoRestart: false, ngrokTrafficPolicyFile: '', ngrokExecutablePath: '',
+      cloudflareExecutablePath: '', cloudflareMode: 'quick', cloudflareTunnelName: '', cloudflareConfigFile: '',
       dailyResetHour: 4, dailyResetTimezone: 'Asia/Macau'
     };
     const secrets = ['appSecret', 'verificationToken', 'encryptKey', 'ngrokAuthtoken'];
+    const tunnelFields = ['connectionMode', 'tunnelProvider', 'publicBaseUrl', 'tunnelAutoRestart',
+      'ngrokAuthtoken', 'ngrokDomain', 'ngrokTrafficPolicyFile', 'ngrokExecutablePath',
+      'cloudflareExecutablePath', 'cloudflareMode', 'cloudflareTunnelName', 'cloudflareConfigFile'];
 
     async function request(path, body) {
       const response = await fetch(`/api/feishu-bot/${path}`, {
@@ -87,6 +92,7 @@ window.__ModuleLoader__.load({
       const [connectionError, setConnectionError] = useState('');
       const [savedMode, setSavedMode] = useState('webhook');
       const [savedProvider, setSavedProvider] = useState('ngrok');
+      const [savedConfig, setSavedConfig] = useState(defaults);
       const [reload, setReload] = useState(0);
       const [connected, setConnected] = useState(false);
       const [secretFlags, setSecretFlags] = useState({});
@@ -96,6 +102,7 @@ window.__ModuleLoader__.load({
         const safe = { ...defaults, ...value };
         secrets.forEach(key => { safe[key] = ''; });
         setConfig(safe);
+        setSavedConfig(safe);
         setSavedMode(safe.connectionMode);
         setSavedProvider(safe.tunnelProvider);
         setSecretFlags(data.configured || data.secrets || value.configured || {});
@@ -112,8 +119,9 @@ window.__ModuleLoader__.load({
         return () => { active = false; };
       }, [reload]);
 
-      async function refreshStatus() {
+      async function refreshStatus(isActive = () => true) {
         const results = await Promise.allSettled([request('webhook-url'), request('tunnel/status'), request('connection/status')]);
+        if (!isActive()) return;
         if (results[0].status === 'fulfilled') setWebhook(results[0].value.url || '');
         if (results[1].status === 'fulfilled') setTunnel(results[1].value);
         setStatusError(results.slice(0, 2).filter(result => result.status === 'rejected').map(result => result.reason.message).join('；'));
@@ -124,25 +132,11 @@ window.__ModuleLoader__.load({
       }
       useEffect(() => {
         let active = true;
-        Promise.allSettled([request('webhook-url'), request('tunnel/status')]).then(results => {
-          if (!active) return;
-          if (results[0].status === 'fulfilled') setWebhook(results[0].value.url || '');
-          if (results[1].status === 'fulfilled') setTunnel(results[1].value);
-          setStatusError(results.filter(result => result.status === 'rejected').map(result => result.reason.message).join('；'));
-        });
-        return () => { active = false; };
-      }, [reload]);
-
-      useEffect(() => {
-        let active = true;
         let timer;
         async function poll() {
-          try {
-            const data = await request('connection/status');
-            if (active) { setConnection(data); setConnectionError(''); }
-          } catch (error) { if (active) setConnectionError(error.message); }
+          await refreshStatus(() => active);
           // Schedule after completion so a slow request cannot overlap the next poll.
-          if (active) timer = setTimeout(poll, 10000);
+          if (active) timer = setTimeout(poll, 5000);
         }
         poll();
         return () => { active = false; clearTimeout(timer); };
@@ -187,12 +181,21 @@ window.__ModuleLoader__.load({
         return h('button', { type: 'button', disabled: Boolean(busy), onClick,
           className: primary ? 'feishu-primary' : '' }, busy === action ? '处理中…' : label);
       }
+      const tunnelDirty = tunnelFields.some(key => config[key] !== savedConfig[key]);
+      const managedProvider = ['ngrok', 'cloudflare'].includes(config.tunnelProvider);
       const modeName = mode => mode === 'websocket' ? '长连接' : '开发者服务器（Webhook）';
       const providerNames = { ngrok: 'ngrok', cloudflare: 'Cloudflare Tunnel', custom: '自定义公网地址' };
       const stateNames = {
         disabled: '未启用', starting: '正在启动', connecting: '正在连接', connected: '已连接',
         reconnecting: '正在重连', stopped: '已停止', error: '连接异常',
         waiting_configuration: '等待配置', listening: '等待事件', ready: '已就绪', disconnected: '已断开'
+      };
+
+      const tunnelStateNames = {
+        idle: '未启动托管隧道', stopped: '已停止', starting: '进程启动中，等待隧道就绪', running: '隧道已连接',
+        backoff: '隧道中断，等待自动重试', error: '启动或连接异常', external: '检测到外部隧道（插件未托管）',
+        not_required: '长连接无需隧道', unsupported: '此接入方式不支持进程管理',
+        detected: '已检测到外部隧道', configured: '地址已配置，连接未验证', unconfigured: '地址未配置'
       };
 
       return h('div', { className: 'feishu-settings' },
@@ -260,21 +263,44 @@ window.__ModuleLoader__.load({
                 h('h3', null, 'Webhook 与公网地址'),
                 h('label', { htmlFor: `${prefix}-harness-port` }, '当前 Harness 监听端口'),
                 h('input', { id: `${prefix}-harness-port`, readOnly: true, value: config.harnessPort || '', placeholder: '等待获取实际端口' }),
-                h('p', { className: 'feishu-muted' }, '端口由 Harness 管理，插件自动读取。需要更换时，停止原实例，再用 dsh web --port 新端口 启动，并同步修改隧道目标端口；保存插件配置不会更改监听端口。'),
+                h('p', { className: 'feishu-muted' }, '端口由 Harness 管理，插件自动读取。需要更换时，停止原实例，再用 dsh web --port 新端口 启动；插件启动隧道时自动使用当前端口。保存插件配置不会更改监听端口。'),
                 field('tunnelProvider', '公网接入方式', { choices: [
                   ['ngrok', 'ngrok'], ['cloudflare', 'Cloudflare Tunnel'], ['custom', '自定义公网地址 / 反向代理']
-                ], hint: '选择后保存生效。隧道由你在本机或服务器上启动，插件不自动启动或停止。' }),
+                ], hint: '选择后保存生效。ngrok 和 Cloudflare 支持一键启动与自动重启；自定义接入由你自行维护。' }),
                 config.tunnelProvider !== savedProvider && h('p', { role: 'status', className: 'feishu-muted' },
                   `公网接入方式尚未保存；已保存的方式为 ${providerNames[savedProvider]}。原公网地址会保留，请更新为所选服务提供的地址后保存。`),
-                field('publicBaseUrl', config.tunnelProvider === 'ngrok' ? '公网服务地址（可选）' : '公网服务地址', {
+                field('publicBaseUrl', config.tunnelProvider === 'ngrok' || (config.tunnelProvider === 'cloudflare' && config.cloudflareMode === 'quick') ? '公网服务地址（可选）' : '公网服务地址', {
                   placeholder: config.tunnelProvider === 'cloudflare' ? 'https://your-tunnel.trycloudflare.com' : 'https://your-host.example',
-                  hint: config.tunnelProvider === 'ngrok' ? '填写 HTTPS 根地址；留空时检测指向当前 Harness 端口的 ngrok 隧道。' : '填写隧道或反向代理提供的 HTTPS 根地址，不包含 /webhook/feishu；保存后生成完整回调地址。'
+                  hint: config.tunnelProvider === 'ngrok' ? '填写 HTTPS 根地址；留空时检测指向当前 Harness 端口的 ngrok 隧道。' : config.tunnelProvider === 'cloudflare' && config.cloudflareMode === 'quick' ? '临时隧道启动后自动使用检测到的最新地址；这里可以留空。' : '填写隧道或反向代理提供的 HTTPS 根地址，不包含 /webhook/feishu；保存后生成完整回调地址。'
                 }),
-                config.tunnelProvider === 'cloudflare' && h('div', { className: 'feishu-muted' },
-                  h('p', null, '安装 cloudflared 后，可在终端启动 Quick Tunnel：'),
-                  h('code', null, Number.isInteger(config.harnessPort) && config.harnessPort > 0
-                    ? `cloudflared tunnel --url http://127.0.0.1:${config.harnessPort}` : '请先刷新页面以获取当前 Harness 端口'),
-                  h('p', null, '将终端输出的 HTTPS 地址填入上方。Quick Tunnel 地址会变化，重启后需要重新保存并更新飞书回调地址。固定域名请使用已配置的命名隧道。')),
+                config.tunnelProvider === 'ngrok' && h(React.Fragment, null,
+                  field('ngrokDomain', 'ngrok 固定域名（可选）', { placeholder: 'your-domain.ngrok.app', hint: '留空时使用 ngrok 分配的地址；指定固定域名时应与公网服务地址一致。' }),
+                  field('ngrokAuthtoken', 'ngrok Authtoken（可选）', { hint: '留空使用已保存凭证或系统中的 ngrok 配置；输入值不会回显。' }),
+                  field('ngrokTrafficPolicyFile', 'ngrok Traffic Policy 文件（可选）', { hint: '留空时检测 ~/.config/ngrok/policy.yaml；只使用现有文件，不修改策略内容。' }),
+                  field('ngrokExecutablePath', 'ngrok 程序路径（可选）', { placeholder: '/usr/local/bin/ngrok 或 C:\\tools\\ngrok.exe', hint: '留空从 PATH 查找 ngrok。填写程序本身的路径，不要填写命令或额外参数。' })),
+                config.tunnelProvider === 'cloudflare' && h(React.Fragment, null,
+                  field('cloudflareMode', 'Cloudflare 隧道类型', { choices: [
+                    ['quick', '临时隧道（Quick Tunnel）'], ['named', '固定域名（本地命名隧道）']
+                  ] }),
+                  field('cloudflareExecutablePath', 'cloudflared 程序路径（可选）', { placeholder: '/usr/local/bin/cloudflared 或 C:\\tools\\cloudflared.exe', hint: '留空从 PATH 查找 cloudflared。' }),
+                  config.cloudflareMode === 'named' && h(React.Fragment, null,
+                    field('cloudflareTunnelName', '命名隧道名称或 UUID', { hint: '填写已创建的本地命名隧道名称或 UUID。' }),
+                    field('cloudflareConfigFile', 'Cloudflare 配置文件路径', { hint: '必填本地 YAML 文件，包含 credentials-file 和与公网域名对应的 ingress；插件在临时副本中使用当前 Harness 端口，不改源文件。' })),
+                  config.cloudflareMode === 'quick' && h('div', { className: 'feishu-muted' },
+                    h('p', null, '临时隧道自动获取 HTTPS 地址，无需预填公网服务地址。每次重启可能更换地址；请复制下方最新地址，手动更新飞书事件与回调配置。插件不会修改飞书后台。'),
+                    h('p', null, '也可手动启动：'),
+                    h('code', null, Number.isInteger(config.harnessPort) && config.harnessPort > 0
+                      ? `cloudflared tunnel --url http://127.0.0.1:${config.harnessPort}` : '请先刷新页面以获取当前 Harness 端口'))),
+                managedProvider && h('div', { className: 'feishu-field' },
+                  h('div', { className: 'feishu-actions' },
+                    h('button', { type: 'button', id: `${prefix}-tunnelAutoRestart`, role: 'switch',
+                      'aria-checked': Boolean(config.tunnelAutoRestart), 'aria-labelledby': `${prefix}-tunnelAutoRestart-label`,
+                      'aria-describedby': `${prefix}-tunnelAutoRestart-hint`, className: 'feishu-switch', disabled: Boolean(busy),
+                      onClick: () => edit('tunnelAutoRestart', !config.tunnelAutoRestart) }, h('span', { 'aria-hidden': true })),
+                    h('label', { id: `${prefix}-tunnelAutoRestart-label`, htmlFor: `${prefix}-tunnelAutoRestart` }, '隧道守护：异常退出后自动拉起')),
+                  h('small', { id: `${prefix}-tunnelAutoRestart-hint` }, '保存后生效：开启时缺少隧道会自动启动，异常退出后自动重试；关闭仅停止自动重试，不停止已运行进程。守护随 Harness 运行，Harness 退出后不会继续守护。'),
+                  h('small', null, `已保存的守护设置：${savedConfig.tunnelAutoRestart ? '开启' : '关闭'}。${config.tunnelAutoRestart !== savedConfig.tunnelAutoRestart ? '开关修改尚未保存。' : ''}`),
+                  h('small', null, 'Linux、Windows、macOS 均需先安装对应的 ngrok 或 cloudflared；支持 PATH 和自定义程序路径，Windows 可使用 .exe，无需 Bash。')),
                 h('label', { htmlFor: `${prefix}-webhook` }, '已保存配置的 Webhook 地址'),
                 h('div', { className: 'feishu-actions' },
                   h('input', { id: `${prefix}-webhook`, readOnly: true, value: webhook, placeholder: '配置公网地址后显示' }),
@@ -284,16 +310,32 @@ window.__ModuleLoader__.load({
                   }) }, '复制')),
                 h('p', { className: 'feishu-muted' }, '在飞书应用的「事件订阅」中填写公网可访问的请求地址，并添加 im.message.receive_v1 事件。'),
                 h('p', { role: 'status' }, tunnel
-                  ? `已保存配置的公网状态（${providerNames[tunnel.provider] || tunnel.provider}）：${tunnel.state === 'not_required' ? '长连接无需隧道' : tunnel.provider === 'ngrok' ? (tunnel.running ? '已检测到 ngrok 隧道' : '未检测到 ngrok 隧道') : tunnel.state === 'configured' ? '地址已配置，连接未验证' : '地址未配置'}`
+                  ? `已保存配置的公网状态（${providerNames[tunnel.provider] || tunnel.provider}）：${tunnelStateNames[tunnel.state] || tunnel.state || '状态未知'}`
                   : '尚未取得公网接入状态'),
                 tunnel?.message && h('p', { className: 'feishu-muted' }, tunnel.message),
                 statusError && h('p', { role: 'alert', className: 'feishu-error' }, statusError),
                 config.tunnelProvider === 'ngrok' && h('div', { className: 'feishu-muted' },
-                  h('p', null, '请在本机启动 ngrok；此处检测指向当前 Harness 端口的已有隧道。将 YOUR-NGROK-DOMAIN 替换为自己的域名，并按需保留现有的 --traffic-policy-file 参数：'),
+                  h('p', null, '也可在本机手动启动 ngrok；插件会检测指向当前 Harness 端口的已有隧道。手动命令示例（按需保留 --traffic-policy-file）：'),
                   h('code', null, Number.isInteger(config.harnessPort) && config.harnessPort > 0
                     ? `ngrok http ${config.harnessPort} --url https://YOUR-NGROK-DOMAIN` : '请先刷新页面以获取当前 Harness 端口'),
                   h('p', null, '飞书 POST 回调不能完成浏览器登录。入口策略需要允许它到达 /webhook/feishu，由插件校验飞书凭据；管理页面保留访问保护。')),
-                button('刷新状态', () => run('status', refreshStatus), 'status')),
+                tunnel?.paused && h('p', { role: 'status', className: 'feishu-muted' }, '守护已暂停；点击启动，或关闭守护并保存后重新开启并保存，即可恢复。'),
+                tunnel?.managed && h('p', { className: 'feishu-muted' }, `插件托管进程 · 自动重试次数：${tunnel.restartCount || 0}${tunnel.nextRetryAt ? ` · 下次重试：${new Date(tunnel.nextRetryAt).toLocaleTimeString()}` : ''}`),
+                tunnelDirty && managedProvider && h('p', { role: 'status', className: 'feishu-muted' }, '隧道相关配置尚未保存，请先保存，再启动隧道。启动按钮仅使用已保存的配置。'),
+                h('div', { className: 'feishu-actions' },
+                  managedProvider && h('button', { type: 'button', disabled: Boolean(busy) || loading || tunnelDirty || savedMode !== 'webhook' || tunnel?.state === 'starting' || Boolean(tunnel?.managed && tunnel?.running),
+                    onClick: () => run('tunnel-start', async () => {
+                      await request('tunnel/start', {});
+                      await refreshStatus();
+                      setNotice({ text: '已请求启动隧道，请查看运行状态与 Webhook 地址。' });
+                    }) }, busy === 'tunnel-start' ? '启动中…' : '启动当前端口的隧道'),
+                  tunnel?.managed && h('button', { type: 'button', disabled: Boolean(busy),
+                    onClick: () => run('tunnel-stop', async () => {
+                      await request('tunnel/stop', {});
+                      await refreshStatus();
+                      setNotice({ text: '已停止插件托管的隧道并暂停自动重试；点击启动或重新开启守护可恢复。' });
+                    }) }, busy === 'tunnel-stop' ? '停止中…' : '停止托管隧道'),
+                  button('刷新状态', () => run('status', refreshStatus), 'status'))),
               h('div', { className: 'feishu-actions' },
                 h('button', { type: 'submit', disabled: Boolean(busy), className: 'feishu-primary' }, busy === 'save' ? '保存中…' : '保存配置'))),
             notice && h('p', { role: notice.error ? 'alert' : 'status', className: notice.error ? 'feishu-error' : 'feishu-success' }, notice.text),
@@ -310,6 +352,9 @@ window.__ModuleLoader__.load({
       .feishu-field{display:flex;flex-direction:column;gap:6px;margin:14px 0}.feishu-settings label{font-weight:500}
       .feishu-settings input,.feishu-settings select,.feishu-settings textarea{width:100%;min-width:0;border:1px solid var(--dsw-alias-border-l4,#ccc);border-radius:8px;background:var(--dsw-alias-bg-layer-3,#fff);color:inherit;padding:9px 11px;font:inherit}
       .feishu-settings textarea{resize:vertical}
+      .feishu-settings .feishu-switch{width:46px;height:26px;padding:3px;border-radius:20px;display:inline-flex;align-items:center;flex-shrink:0;background:var(--dsw-alias-bg-layer-3,#ddd)}
+      .feishu-switch span{width:18px;height:18px;border-radius:50%;background:var(--dsw-alias-label-secondary,#686a70);transition:transform .15s}
+      .feishu-settings .feishu-switch[aria-checked="true"]{background:var(--dsw-alias-brand-primary,#4d6bfe)}.feishu-switch[aria-checked="true"] span{transform:translateX(20px);background:white}
       .feishu-settings button{border:1px solid var(--dsw-alias-border-l4,#ccc);border-radius:8px;padding:8px 14px;background:var(--dsw-alias-bg-layer-3,#fff);color:inherit;font:inherit;cursor:pointer;white-space:nowrap}
       .feishu-settings button:disabled{opacity:.55;cursor:default}.feishu-settings .feishu-primary{background:var(--dsw-alias-brand-primary,#4d6bfe);border-color:transparent;color:white}
       .feishu-settings :is(input,select,textarea,button,a):focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4d6bfe);outline-offset:2px}

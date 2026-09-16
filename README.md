@@ -38,7 +38,7 @@
 | 工作状态 | 开始处理时在原消息添加敲键盘表情回应（`Typing`），结束时尝试清除；状态更新失败不阻断任务或答复 |
 | 自动答复 | Agent 完成后向原消息回复最终文本，较长回复分段发送 |
 | Webhook 验证 | 处理地址验证、Verification Token、加密请求解密和签名校验 |
-| 公网接入 | Webhook 可选 ngrok、Cloudflare Tunnel 或自定义 HTTPS 地址；隧道需另行启动 |
+| 公网接入 | Webhook 可选 ngrok、Cloudflare Tunnel 或自定义 HTTPS 地址；ngrok / Cloudflare 可在面板启动并守护 |
 | 连接检查 | 测试应用凭据、显示长连接状态、检测本机 ngrok 隧道 |
 | 用户接入 | 飞书后台控制应用可用范围；首次对话必须提供并确认姓名，无需预填 `open_id` 或用户名 |
 | 用户隔离 | 每用户独立工作目录及 SQLite 数据库，不同聊天上下文分开；重名不会合并数据 |
@@ -116,7 +116,7 @@ Cloudflare Quick Tunnel 可在另一个终端启动（需先安装 `cloudflared`
 npm run start:cloudflare -- --port 3080
 ```
 
-在插件选择 **Cloudflare Tunnel**，将日志中生成的 `https://…trycloudflare.com` 根地址填入「公网服务地址」并保存。飞书后台使用该地址加 `/webhook/feishu`。Quick Tunnel 域名会变化，长期使用建议配置命名隧道。选择或保存地址不会自动启动隧道，也不会验证公网连通性。
+在插件选择 **Cloudflare Tunnel**，将日志中生成的 `https://…trycloudflare.com` 根地址填入「公网服务地址」并保存。飞书后台使用该地址加 `/webhook/feishu`。Quick Tunnel 域名会变化，长期使用建议配置命名隧道。也可直接使用插件面板的一键启动和守护；保存地址本身不代表公网连通。
 
 完整字段解释、飞书权限、两种隧道命令和配置顺序见 **[飞书接入指南](docs/setup.md)**。
 
@@ -129,6 +129,16 @@ npm run start:cloudflare -- --port 3080
 确认姓名后发送简单文本，确认 Harness 中出现包含该姓名的会话，并在飞书收到最终答复。再发送追问验证同一聊天沿用会话，发送 `/new` 验证切换。群聊测试需先加入机器人并 @机器人。
 
 「测试连接成功」说明应用凭据通过认证；「请求地址保存成功」说明地址验证通过；「长连接已连接」说明连接已建立。只有实际收到机器人答复，才验证了完整链路。
+
+### 隧道启动与自动重启
+
+在 Plugin list 的飞书卡片中选择 ngrok 或 Cloudflare，保存配置后点击 **启动当前端口的隧道**。先安装对应系统的原生程序，加入 PATH 或填写程序绝对路径；Linux、Windows、macOS 均不依赖 Bash/alias。端口直接取 Harness 实际监听值。
+
+**隧道守护**滑动开关保存后生效：开启时自动启动缺失的隧道，异常退出后退避重试，最长等待 60 秒；关闭只取消自动重试，不停止已有进程。**停止托管隧道**只停止插件启动的进程，并暂停本次守护；手动启动或关闭守护保存后重新开启可恢复。守护随 Harness 运行，并非系统常驻服务。
+
+ngrok 可设置 Traffic Policy 文件；留空时探测 `~/.config/ngrok/policy.yaml`，不会修改策略内容。已有匹配端口和域名的 ngrok 会被复用而非重复启动；外部进程不会被插件停止。Cloudflare 支持 **临时 Quick Tunnel** 和 **固定的本地管理命名隧道**；后者需要现成的本地配置、凭据和 DNS。命名模式使用临时配置副本指向当前端口，不修改原文件。暂不支持仅凭 Cloudflare Dashboard tunnel token 配置远程管理隧道。
+
+临时模式会显示本次分配的 URL，重启后地址改变时须更新飞书回调地址。进程状态、隧道连接和飞书回调验证是不同检查；请以飞书保存回调及实际收发结果确认完整链路。详见 [隧道设置](docs/setup.md#隧道守护与一键启动)。
 
 ## 默认配置与数据保存
 

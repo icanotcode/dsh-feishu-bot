@@ -143,6 +143,8 @@ async function fixture(t, initial = {}) {
   dom.card();
   let timerId = 0;
   let saved = { connectionMode: 'webhook', tunnelProvider: 'ngrok', harnessPort: 4321, appId: 'cli_example', configured: { appSecret: true, verificationToken: true }, ...initial };
+  let tunnelOverride;
+  const failures = new Map();
   let runtime = { mode: saved.connectionMode, state: saved.connectionMode === 'webhook' ? 'listening' : 'connected', message: '' };
   const React = {
     Fragment: 'fragment',
@@ -171,6 +173,7 @@ async function fixture(t, initial = {}) {
     MutationObserver: dom.MutationObserver,
     fetch: async (url, options) => {
       requests.push({ url, ...options });
+      if (failures.has(url)) throw new Error(failures.get(url));
       if (url.endsWith('/config') && options.method === 'POST') {
         saved = { ...saved, ...JSON.parse(options.body) };
         runtime = { mode: saved.connectionMode, state: saved.connectionMode === 'webhook' ? 'listening' : 'connecting', message: '' };
@@ -178,7 +181,7 @@ async function fixture(t, initial = {}) {
       const data = url.endsWith('/config') ? saved
         : url.endsWith('/connection/status') ? runtime
           : url.endsWith('/webhook-url') ? { url: saved.connectionMode === 'websocket' ? null : saved.publicBaseUrl ? `${saved.publicBaseUrl}/webhook/feishu` : saved.tunnelProvider === 'ngrok' ? 'https://example.ngrok.app/webhook/feishu' : null }
-            : { provider: saved.tunnelProvider, state: saved.connectionMode === 'websocket' ? 'not_required' : saved.tunnelProvider === 'ngrok' ? 'detected' : saved.publicBaseUrl ? 'configured' : 'unconfigured', running: saved.tunnelProvider === 'ngrok' ? true : null, url: saved.publicBaseUrl || null, port: 4321 };
+            : tunnelOverride || { provider: saved.tunnelProvider, state: saved.connectionMode === 'websocket' ? 'not_required' : saved.tunnelProvider === 'ngrok' ? 'detected' : saved.publicBaseUrl ? 'configured' : 'unconfigured', running: saved.tunnelProvider === 'ngrok' ? true : null, url: saved.publicBaseUrl || null, port: 4321 };
       return { ok: true, status: 200, json: async () => data };
     },
     setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
@@ -201,7 +204,9 @@ async function fixture(t, initial = {}) {
   render();
   await settle();
   return { render, settle, nodes, text, field, edit, dispose, timers, requests, registrations,
-    setRuntime: value => { runtime = value; } };
+    setRuntime: value => { runtime = value; },
+    setTunnel: value => { tunnelOverride = value; },
+    fail: (path, message) => { if (message) failures.set(`/api/feishu-bot/${path}`, message); else failures.delete(`/api/feishu-bot/${path}`); } };
 }
 
 test('inventory settings expose transport choice without extra navigation; unsaved selection does not claim runtime switched', async t => {
@@ -253,7 +258,7 @@ test('connection polling updates runtime without resetting draft edits and is ca
   assert.match(f.text(), /当前运行：长连接 · 正在重连/);
   assert.equal(f.field('appId').props.value, 'cli_unsaved');
   assert.equal(f.timers.size, 1);
-  assert.equal(f.requests.filter(request => request.url.endsWith('/tunnel/status')).length, 1);
+  assert.equal(f.requests.filter(request => request.url.endsWith('/tunnel/status')).length, 2);
   f.dispose();
   assert.equal(f.timers.size, 0);
 });
@@ -323,4 +328,118 @@ test('empty legacy user settings allow configuration and shared workspace permis
   assert.equal(body.permissionPreset, 'read-only');
   assert.equal('authorizedUsers' in body, false);
   assert.match(f.text(), /配置已保存/);
+});
+
+
+function action(f, label) { return f.nodes().find(node => node.type === 'button' && f.text(node) === label); }
+async function save(f) {
+  f.nodes().find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+  await f.settle();
+}
+async function pollStatus(f) {
+  const [id, poll] = [...f.timers][0];
+  f.timers.delete(id);
+  await poll();
+  await f.settle();
+}
+
+test('watchdog is an accessible draft switch; save persists state and omitted credentials stay private', async t => {
+  const f = await fixture(t);
+  const toggle = f.field('tunnelAutoRestart');
+  assert.equal(toggle.type, 'button');
+  assert.equal(toggle.props.type, 'button', 'native button supports Enter and Space without form submit');
+  assert.equal(toggle.props.role, 'switch');
+  assert.equal(toggle.props['aria-checked'], false);
+  assert.ok(toggle.props['aria-labelledby']);
+  toggle.props.onClick();
+  f.render();
+  assert.equal(f.field('tunnelAutoRestart').props['aria-checked'], true);
+  assert.match(f.text(), /已保存的守护设置：关闭/);
+  assert.match(f.text(), /开关修改尚未保存/);
+  assert.equal(action(f, '启动当前端口的隧道').props.disabled, true);
+  assert.equal(f.requests.some(r => r.method === 'POST'), false);
+  assert.equal(f.field('ngrokAuthtoken').props.type, 'password');
+  f.edit('ngrokTrafficPolicyFile', '/home/example/policy.yaml');
+  f.edit('ngrokExecutablePath', 'C:\\tools\\ngrok.exe');
+  await save(f);
+  const body = JSON.parse(f.requests.find(r => r.method === 'POST').body);
+  assert.equal(body.tunnelAutoRestart, true);
+  assert.equal(body.ngrokTrafficPolicyFile, '/home/example/policy.yaml');
+  assert.equal(body.ngrokExecutablePath, 'C:\\tools\\ngrok.exe');
+  assert.equal('ngrokAuthtoken' in body, false);
+  assert.match(f.text(), /已保存的守护设置：开启/);
+  assert.doesNotMatch(f.text(), /开关修改尚未保存/);
+});
+
+test('start uses saved configuration only and is blocked by tunnel drafts but not unrelated edits', async t => {
+  const f = await fixture(t);
+  assert.equal(action(f, '启动当前端口的隧道').props.disabled, false);
+  f.edit('appId', 'cli_other_draft');
+  assert.equal(action(f, '启动当前端口的隧道').props.disabled, false);
+  f.edit('tunnelProvider', 'cloudflare');
+  assert.equal(action(f, '启动当前端口的隧道').props.disabled, true);
+  f.edit('cloudflareMode', 'named');
+  assert.ok(f.field('cloudflareConfigFile'));
+  assert.ok(f.field('cloudflareTunnelName'));
+  f.edit('cloudflareTunnelName', 'feishu-production');
+  f.edit('cloudflareConfigFile', 'C:\\Users\\Example\\config.yml');
+  f.edit('publicBaseUrl', 'https://bot.example.com');
+  await save(f);
+  assert.equal(action(f, '启动当前端口的隧道').props.disabled, false);
+  action(f, '启动当前端口的隧道').props.onClick();
+  await f.settle();
+  const start = f.requests.find(r => r.url.endsWith('/tunnel/start'));
+  assert.equal(start.method, 'POST');
+  assert.deepEqual(JSON.parse(start.body), {}, 'no draft fields can be passed into process launch');
+  assert.match(f.text(), /已请求启动隧道/);
+  const saved = JSON.parse(f.requests.find(r => r.method === 'POST' && r.url.endsWith('/config')).body);
+  assert.equal(saved.cloudflareMode, 'named');
+  assert.equal(saved.cloudflareTunnelName, 'feishu-production');
+  assert.equal(saved.cloudflareConfigFile, 'C:\\Users\\Example\\config.yml');
+});
+
+test('polling reflects process readiness, retries, pause and request errors without overwriting drafts', async t => {
+  const f = await fixture(t, { tunnelProvider: 'cloudflare', cloudflareMode: 'quick' });
+  assert.match(f.text(), /每次重启可能更换地址/);
+  assert.equal(action(f, '停止托管隧道'), undefined);
+  f.edit('cloudflareExecutablePath', '/opt/cloudflared');
+  f.setTunnel({ provider: 'cloudflare', mode: 'quick', state: 'starting', managed: true, running: true, restartCount: 0 });
+  await pollStatus(f);
+  assert.match(f.text(), /进程启动中，等待隧道就绪/);
+  assert.doesNotMatch(f.text(), /Cloudflare Tunnel）：隧道已连接/);
+  assert.ok(action(f, '停止托管隧道'));
+  f.setTunnel({ provider: 'cloudflare', state: 'backoff', managed: true, running: false, restartCount: 2, nextRetryAt: Date.now() + 5000, message: '进程已退出' });
+  await pollStatus(f);
+  assert.match(f.text(), /隧道中断，等待自动重试/);
+  assert.match(f.text(), /自动重试次数：2/);
+  assert.equal(f.field('cloudflareExecutablePath').props.value, '/opt/cloudflared');
+  f.fail('tunnel/status', 'status unavailable');
+  await pollStatus(f);
+  assert.match(f.text(), /status unavailable/);
+  assert.equal(f.timers.size, 1, 'errors must retain the shared polling loop');
+  f.fail('tunnel/status', '');
+  f.setTunnel({ provider: 'cloudflare', state: 'idle', managed: true, running: false, paused: true });
+  await pollStatus(f);
+  assert.match(f.text(), /守护已暂停/);
+  assert.doesNotMatch(f.text(), /status unavailable/);
+  action(f, '停止托管隧道').props.onClick();
+  await f.settle();
+  const stop = f.requests.find(r => r.url.endsWith('/tunnel/stop'));
+  assert.deepEqual(JSON.parse(stop.body), {});
+  f.dispose();
+  assert.equal(f.timers.size, 0);
+});
+
+test('launch errors are visible and custom or websocket transports have no process controls', async t => {
+  const f = await fixture(t);
+  f.fail('tunnel/start', '找不到 ngrok 程序');
+  action(f, '启动当前端口的隧道').props.onClick();
+  await f.settle();
+  assert.match(f.text(), /找不到 ngrok 程序/);
+  assert.equal(action(f, '启动当前端口的隧道').props.disabled, false);
+  f.edit('tunnelProvider', 'custom');
+  assert.equal(f.field('tunnelAutoRestart'), undefined);
+  assert.equal(action(f, '启动当前端口的隧道'), undefined);
+  f.edit('connectionMode', 'websocket');
+  assert.equal(action(f, '停止托管隧道'), undefined);
 });
