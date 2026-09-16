@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { FeishuClient, feishuTools } from '../lib/index.js';
-import { installFeishuRuntime } from '../lib/runtime.js';
+import { createConversationFixture } from '../test-support/conversation-fixture.mjs';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function deferred() {
@@ -11,38 +11,24 @@ function deferred() {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
-
-function runtime({ add = async () => ({ reaction_id: 'own-reaction' }), remove = async () => {}, reply = async () => {} } = {}) {
-  const listeners = new Map();
-  const tools = [];
+async function runtime(t, { add = async () => ({ reaction_id: 'own-reaction' }), remove = async () => {}, reply = async () => {} } = {}) {
   const calls = [];
-  const warnings = [];
   const signals = new AsyncLocalStorage();
-  let rule;
-  const ctx = {
-    logger: { warn: message => warnings.push(message) },
-    on(name, handler) { listeners.set(name, handler); return () => listeners.delete(name); },
-    tools: { register(tool) { tools.push(tool); return () => {}; } },
-    webhookRuntime: { register(value) { rule = value; return async () => {}; } }
-  };
-  const client = {
+  const app = await createConversationFixture(t, { tools: feishuTools, client: {
     withSignal: (signal, run) => signals.run(signal, run),
     addMessageReaction: async (...args) => { calls.push(['add', ...args]); return add(signals.getStore(), ...args); },
-    deleteMessageReaction: async (...args) => { calls.push(['delete', ...args]); return remove(signals.getStore()); },
-    replyMessage: async (...args) => { calls.push(['reply', ...args]); return reply(signals.getStore()); }
-  };
-  const dispose = installFeishuRuntime(ctx, { source: 'test', workspacePath: '/tmp' }, client, feishuTools, async () => ({}));
-  const agent = { session: { id: 'session', snapshotEvents: () => [{ type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'Done' }] } } }] } };
-  const emit = (name, extra = {}) => listeners.get(name)({ agent, ...extra });
-  return {
-    calls, warnings, dispose, emit, tools, agent,
-    start({ sessionAgent = agent, deliveryId = 'delivery', messageId = 'message' } = {}) {
-      const result = rule.run({ source: 'test', deliveryId, event: { payload: { parsed: { userText: 'hello', messageId, chatId: 'chat', senderId: 'user' } } } }, new AbortController().signal);
-      assert.equal(typeof result.prompt, 'string');
-      const inserted = emit('agent/inbox/inserted', { agent: sessionAgent, message: { source: { kind: 'webhook', provider: 'feishu', source: 'test', ruleId: rule.id, deliveryId } } });
-      assert.equal(inserted, undefined, 'reaction requests must not delay message acceptance');
+    deleteMessageReaction: async (...args) => { calls.push(['delete', ...args]); return remove(signals.getStore(), ...args); },
+    replyMessage: async (...args) => { calls.push(['reply', ...args]); return reply(signals.getStore(), ...args); }
+  } });
+  const warnings = [];
+  app.ctx.logger.warn = message => warnings.push(message);
+  return { ...app, calls, warnings,
+    async start(options = {}) {
+      await app.send({ messageId: 'message', ...options });
+      const agent = [...app.agents.values()].at(-1);
+      await app.claim(agent);
+      return agent;
     },
-    stop(signal = new AbortController().signal) { return emit('agent/turn-stopping', { turn: 1, signal }); }
   };
 }
 
@@ -58,70 +44,78 @@ test('reaction client uses the Feishu create/delete contracts and encodes path I
   ]);
 });
 
-test('adds Typing while working and removes only its returned reaction after the final reply', async () => {
-  const app = runtime();
-  app.start();
+test('only a claimed message starts Typing, then the final reply removes its own reaction once', async t => {
+  const app = await runtime(t);
+  await app.send({ messageId: 'message' });
+  const agent = [...app.agents.values()][0];
+  await tick();
+  assert.deepEqual(app.calls, [], 'queued messages must not claim they are already working');
+  await app.emit('agent/inbox/inserted', { agent, message: agent.queue[0] });
+  await tick();
+  assert.deepEqual(app.calls, []);
+  await app.claim(agent);
   await tick();
   assert.deepEqual(app.calls, [['add', 'message', 'Typing']]);
-  await app.stop();
-  await app.stop();
-  await app.dispose();
+  await app.finish(agent, 'Done');
+  await app.emit('agent/turn-stopping', { agent, turn: 1, signal: new AbortController().signal });
   assert.deepEqual(app.calls, [['add', 'message', 'Typing'], ['reply', 'message', 'Done'], ['delete', 'message', 'own-reaction']]);
 });
 
-test('reaction permission failure does not prevent a final reply or reject shutdown', async () => {
-  const app = runtime({ add: async () => { throw new Error('forbidden'); } });
-  app.start();
+test('reaction permission failure does not prevent a final reply or reject shutdown', async t => {
+  const app = await runtime(t, { add: async () => { throw new Error('forbidden'); } });
+  const agent = await app.start();
   await tick();
-  await app.stop();
-  await app.dispose();
+  await app.finish(agent, 'Done');
   assert.equal(app.warnings.length, 1);
-  assert.match(app.warnings[0], /im:message.reactions:write_only/);
+  assert.match(app.warnings[0], /reaction permission/);
   assert.deepEqual(app.calls.map(call => call[0]), ['add', 'reply']);
 });
 
-test('a late successful add is removed even when the reply has already finished', async () => {
+test('a late successful add is removed after the reply has already been sent', async t => {
   const slow = deferred();
-  const app = runtime({ add: () => slow.promise });
-  app.start();
+  const app = await runtime(t, { add: () => slow.promise });
+  const agent = await app.start();
   await tick();
-  await app.stop();
+  const finished = app.finish(agent, 'Done');
+  await tick();
   assert.deepEqual(app.calls.map(call => call[0]), ['add', 'reply']);
   slow.resolve({ reaction_id: 'late-own-reaction' });
-  await app.dispose();
+  await finished;
   assert.deepEqual(app.calls.at(-1), ['delete', 'message', 'late-own-reaction']);
 });
 
-test('cancelled turns remove reactions with an independent, non-aborted cleanup signal', async () => {
+test('cancelled turns send their cancellation result and clean up using an independent signal', async t => {
   let cleanupSignal;
-  const app = runtime({ remove: async signal => { cleanupSignal = signal; } });
-  app.start();
+  const app = await runtime(t, { remove: async signal => { cleanupSignal = signal; } });
+  const agent = await app.start();
   await tick();
   const cancelled = AbortSignal.abort();
-  await app.stop(cancelled);
-  await app.dispose();
+  await app.emit('agent/turn-stopping', { agent, turn: 1, signal: cancelled });
   assert.notEqual(cleanupSignal, cancelled);
   assert.equal(cleanupSignal.aborted, false);
-  assert.deepEqual(app.calls.map(call => call[0]), ['add', 'delete']);
+  assert.deepEqual(app.calls.map(call => call[0]), ['add', 'reply', 'delete']);
+  assert.match(app.calls.find(call => call[0] === 'reply')[2], /取消/);
 });
 
 for (const event of ['agent/status', 'agent/disposed', 'agent/error']) {
-  test(`${event} clears reactions without needing a turn-stopping event`, async () => {
-    const app = runtime();
-    app.start();
+  test(`${event} sends a terminal result and clears reactions without turn-stopping`, async t => {
+    const app = await runtime(t);
+    const agent = await app.start();
     await tick();
-    app.emit(event, { status: 'idle' });
+    await app.emit(event, { agent, status: 'idle' });
     await tick();
-    assert.deepEqual(app.calls.map(call => call[0]), ['add', 'delete']);
-    await app.dispose();
+    assert.deepEqual(app.calls.map(call => call[0]), ['add', 'reply', 'delete']);
+    await app.emit(event, { agent, status: 'idle' });
+    await tick();
     assert.equal(app.calls.filter(call => call[0] === 'delete').length, 1);
+    assert.equal(app.calls.filter(call => call[0] === 'reply').length, 1);
   });
 }
 
-test('plugin shutdown waits for cleanup of an in-flight add', async () => {
+test('plugin shutdown waits for cleanup of an in-flight add', async t => {
   const slow = deferred();
-  const app = runtime({ add: () => slow.promise });
-  app.start();
+  const app = await runtime(t, { add: () => slow.promise });
+  await app.start();
   await tick();
   let disposed = false;
   const shutdown = app.dispose().then(() => { disposed = true; });
@@ -132,61 +126,71 @@ test('plugin shutdown waits for cleanup of an in-flight add', async () => {
   assert.deepEqual(app.calls.at(-1), ['delete', 'message', 'late-shutdown-reaction']);
 });
 
-test('idle cancellation clears a late add even after its session mapping has been removed', async () => {
+test('idle cancellation clears a late add even after the turn mapping has been removed', async t => {
   const slow = deferred();
-  const app = runtime({ add: () => slow.promise });
-  app.start();
+  const app = await runtime(t, { add: () => slow.promise });
+  const agent = await app.start();
   await tick();
-  app.emit('agent/status', { status: 'idle' });
-  await app.stop();
-  assert.deepEqual(app.calls.map(call => call[0]), ['add']);
+  await app.emit('agent/status', { agent, status: 'idle' });
+  await app.emit('agent/turn-stopping', { agent, turn: 1, signal: new AbortController().signal });
+  assert.deepEqual(app.calls.map(call => call[0]), ['add', 'reply']);
   slow.resolve({ reaction_id: 'late-cancelled-reaction' });
   await tick();
   assert.deepEqual(app.calls.at(-1), ['delete', 'message', 'late-cancelled-reaction']);
-  await app.dispose();
-  assert.equal(app.calls.length, 2);
+  assert.equal(app.calls.filter(call => call[0] === 'reply').length, 1);
 });
 
-test('concurrent sessions clean up only their own message and reaction IDs', async () => {
+test('concurrent users only reply to and clean up their own message and reaction IDs', async t => {
   const first = deferred();
   const second = deferred();
-  const app = runtime({ add: (_signal, messageId) => messageId === 'message' ? first.promise : second.promise });
-  const other = { session: { ...app.agent.session, id: 'other-session' } };
-  app.start();
-  app.start({ sessionAgent: other, deliveryId: 'other-delivery', messageId: 'other-message' });
+  const app = await runtime(t, { add: (_signal, messageId) => messageId === 'message' ? first.promise : second.promise });
+  const alice = await app.start();
+  const bob = await app.start({ senderId: 'bob', messageId: 'other-message' });
+  assert.notEqual(alice.session.id, bob.session.id);
   await tick();
   second.resolve({ reaction_id: 'other-reaction' });
-  await tick();
-  app.emit('agent/status', { agent: other, status: 'idle' });
-  await tick();
+  await app.finish(bob, 'Bob done');
   assert.deepEqual(app.calls.filter(call => call[0] === 'delete'), [['delete', 'other-message', 'other-reaction']]);
   first.resolve({ reaction_id: 'first-reaction' });
-  await app.stop();
-  await app.dispose();
+  await app.finish(alice, 'Alice done');
   assert.deepEqual(app.calls.filter(call => call[0] === 'delete'), [
-    ['delete', 'other-message', 'other-reaction'],
-    ['delete', 'message', 'first-reaction']
+    ['delete', 'other-message', 'other-reaction'], ['delete', 'message', 'first-reaction']
   ]);
+  assert.deepEqual(app.calls.filter(call => call[0] === 'reply'), [
+    ['reply', 'other-message', 'Bob done'], ['reply', 'message', 'Alice done']
+  ]);
+});
+
+test('sequential turns in one session keep their own original-message reply targets', async t => {
+  const app = await runtime(t);
+  const agent = await app.start();
+  await app.send({ messageId: 'followup-message', text: 'followup' });
+  assert.equal(app.agents.size, 1);
+  await app.finish(agent, 'First result');
+  await app.claim(agent);
+  await app.finish(agent, 'Second result');
+  assert.deepEqual(app.calls.filter(call => call[0] === 'reply'), [
+    ['reply', 'message', 'First result'], ['reply', 'followup-message', 'Second result']
+  ]);
+  assert.deepEqual(app.calls.filter(call => call[0] === 'delete').map(call => call[1]), ['message', 'followup-message']);
+});
+
+test('isolated user cannot use shared reply API to redirect replies or suppress automatic delivery', async t => {
+  const app = await runtime(t);
+  const agent = await app.start();
+  const tool = app.tools.get('feishu_reply_message');
+  await assert.rejects(() => tool.execute({ messageId: 'another-users-message', text: 'Forged reply' }, {
+    agent, signal: new AbortController().signal
+  }), /Shared Feishu application tools are unavailable/);
+  await app.finish(agent, 'Done');
   assert.deepEqual(app.calls.filter(call => call[0] === 'reply'), [['reply', 'message', 'Done']]);
+  assert.equal(app.calls.filter(call => call[0] === 'delete').length, 1);
 });
 
-test('an explicit reply suppresses the automatic reply while still cleaning up Typing', async () => {
-  const app = runtime();
-  app.start();
-  await tick();
-  const tool = app.tools.find(tool => tool.name === 'feishu_reply_message');
-  await tool.execute({ messageId: 'message', text: 'Explicit reply' }, { signal: new AbortController().signal });
-  await app.stop();
-  await app.dispose();
-  assert.deepEqual(app.calls.map(call => call[0]), ['add', 'delete']);
-});
-
-test('reply failure still clears Typing and reaction deletion failure stays contained', async () => {
-  const app = runtime({ reply: async () => { throw new Error('reply network failure'); }, remove: async () => { throw new Error('cleanup network failure'); } });
-  app.start();
-  await tick();
-  await app.stop();
-  await app.dispose();
+test('reply failure still clears Typing and reaction deletion failure stays contained', async t => {
+  const app = await runtime(t, { reply: async () => { throw new Error('reply network failure'); }, remove: async () => { throw new Error('cleanup network failure'); } });
+  const agent = await app.start();
+  await app.finish(agent, 'Done');
   assert.deepEqual(app.calls.map(call => call[0]), ['add', 'reply', 'delete']);
   assert.equal(app.warnings.length, 2);
 });

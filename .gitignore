@@ -27,3 +27,8 @@ coverage/
 .cloudflared/
 cloudflared.yml
 cloudflared.yaml
+
+# Per-user private state
+.feishu-users/
+feishu-history/
+history.sqlite*

@@ -157,3 +157,71 @@ test('Cloudflare and custom show unconfigured addresses, and websocket hides tun
   assert.equal(f.field('tunnelProvider'), undefined);
   assert.equal(f.field('publicBaseUrl'), undefined);
 });
+
+test('user settings show deny-by-default and restricted capabilities, save parsed names and numeric midnight', async t => {
+  const f = await fixture(t, { authorizedUsers: [{ openId: 'ou_existing', displayName: 'Existing User' }] });
+  assert.equal(f.field('authorizedUsers').props.value, 'ou_existing Existing User');
+  assert.equal(f.field('dailyResetHour').props.value, 4);
+  assert.equal(f.field('dailyResetTimezone').props.value, 'Asia/Macau');
+  assert.match(f.text(), /留空会拒绝所有用户/);
+  assert.match(f.text(), /不提供任意主机 Shell/);
+  assert.match(f.text(), /发送 \/new 新开会话/);
+  assert.doesNotMatch(f.text(), /完全访问/);
+  f.edit('authorizedUsers', 'ou_alice Alice Example\n\nou_bob 李四');
+  f.edit('dailyResetHour', '0');
+  f.edit('dailyResetTimezone', 'UTC');
+  f.nodes().find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+  await f.settle();
+  const body = JSON.parse(f.requests.find(request => request.method === 'POST').body);
+  assert.deepEqual(body.authorizedUsers, [{ openId: 'ou_alice', displayName: 'Alice Example' }, { openId: 'ou_bob', displayName: '李四' }]);
+  assert.equal(body.dailyResetHour, 0);
+  assert.equal(body.dailyResetTimezone, 'UTC');
+  assert.equal(f.field('dailyResetHour').props.value, 0);
+  assert.equal(f.field('authorizedUsers').props.value, 'ou_alice Alice Example\nou_bob 李四');
+});
+
+test('malformed user text prevents saving and an empty list explicitly clears authorizations', async t => {
+  const f = await fixture(t);
+  f.edit('authorizedUsers', 'ou_no_name');
+  f.nodes().find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+  await f.settle();
+  assert.equal(f.requests.some(request => request.method === 'POST'), false);
+  assert.match(f.text(), /需要填写 open_id 和显示名称/);
+  f.edit('authorizedUsers', ' \n ');
+  f.nodes().find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+  await f.settle();
+  assert.deepEqual(JSON.parse(f.requests.find(request => request.method === 'POST').body).authorizedUsers, []);
+  assert.match(f.text(), /配置已保存/);
+});
+
+test('individual permissions survive name edits and reload, inherit explicitly and disappear with removed users', async t => {
+  const f = await fixture(t, { authorizedUsers: [
+    { openId: 'ou_alice', displayName: 'Alice', permissionPreset: 'read-only' },
+    { openId: 'ou_bob', displayName: 'Bob' },
+  ] });
+  assert.equal(f.field('user-permission-0').props.value, 'read-only');
+  assert.equal(f.field('user-permission-1').props.value, '');
+  f.edit('user-permission-1', 'workspace-write');
+  f.edit('authorizedUsers', 'ou_alice\nou_bob Bob');
+  f.edit('authorizedUsers', 'ou_alice Alice Renamed\nou_bob Bob');
+  assert.equal(f.field('user-permission-0').props.value, 'read-only');
+  assert.equal(f.field('user-permission-1').props.value, 'workspace-write');
+  f.nodes().find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+  await f.settle();
+  let body = JSON.parse(f.requests.filter(request => request.method === 'POST').at(-1).body);
+  assert.deepEqual(body.authorizedUsers, [
+    { openId: 'ou_alice', displayName: 'Alice Renamed', permissionPreset: 'read-only' },
+    { openId: 'ou_bob', displayName: 'Bob', permissionPreset: 'workspace-write' },
+  ]);
+  assert.equal(f.field('user-permission-0').props.value, 'read-only');
+  assert.equal(f.field('user-permission-1').props.value, 'workspace-write');
+  f.edit('user-permission-0', '');
+  f.edit('authorizedUsers', 'ou_alice Alice Renamed');
+  assert.equal(f.field('user-permission-1'), undefined);
+  f.nodes().find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+  await f.settle();
+  body = JSON.parse(f.requests.filter(request => request.method === 'POST').at(-1).body);
+  assert.deepEqual(body.authorizedUsers, [{ openId: 'ou_alice', displayName: 'Alice Renamed' }]);
+  f.edit('authorizedUsers', 'ou_alice Alice Renamed\nou_bob Bob Again');
+  assert.equal(f.field('user-permission-1').props.value, '', 'removed users must not retain a hidden old override');
+});

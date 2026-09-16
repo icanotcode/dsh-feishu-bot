@@ -4,7 +4,7 @@
 
 [![Tests](https://github.com/icanotcode/dsh-feishu-bot/actions/workflows/test.yml/badge.svg)](https://github.com/icanotcode/dsh-feishu-bot/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Node.js ≥22](https://img.shields.io/badge/Node.js-%E2%89%A522-339933.svg)](package.json)
+[![Node.js ≥22.13](https://img.shields.io/badge/Node.js-%E2%89%A522.13-339933.svg)](package.json)
 
 English · [简体中文](README.md)
 
@@ -20,13 +20,13 @@ The plugin supports two connection modes: **developer server (HTTP Webhook)** an
 Feishu text message → Webhook / WebSocket → Harness Agent → Reply to the original Feishu message
 ```
 
-This is an independently maintained community plugin, unaffiliated with DeepSeek or Feishu. The current version is **0.1.4**. Install it from this repository; it has not been published to npm.
+This is an independently maintained community plugin, unaffiliated with DeepSeek or Feishu. The current version is **0.2.0**. Install it from this repository; it has not been published to npm.
 
 ## Settings preview
 
 ![Feishu plugin settings](assets/settings-cloudflare.png)
 
-Actual settings UI captured in an isolated demo environment with no application credentials configured. The screenshot shows the Cloudflare settings in 0.1.3; the example hostname does not indicate a working public tunnel.
+Actual settings UI captured in an isolated demo environment with no application credentials configured. This older 0.1.3 screenshot does not include the 0.2.0 authorization and daily reset settings; the example hostname does not indicate a working public tunnel.
 
 ## Current capabilities
 
@@ -34,15 +34,18 @@ Actual settings UI captured in an isolated demo environment with no application 
 | --- | --- |
 | Native settings entry | Appears in the plugin list; configuration is available on the “飞书机器人” settings page |
 | Two event transports | Choose Webhook or WebSocket; saving updates the runtime configuration |
-| Text message handling | Receives `im.message.receive_v1` and creates a separate Harness session for each accepted message |
+| Text message handling | Receives `im.message.receive_v1`; reuses the current session for the same tenant, authorized user, and chat |
 | Working indicator | Adds a `Typing` reaction to the original message when processing starts and attempts to remove it when processing ends; reaction failures do not block the task or reply |
 | Automatic replies | Replies to the original message with the Agent's final text; splits long replies into multiple messages |
 | Webhook verification | Handles URL verification, Verification Token checks, encrypted payload decryption, and signature verification |
 | Public endpoints | Webhook supports ngrok, Cloudflare Tunnel, or a custom HTTPS address; start the tunnel separately |
 | Connection checks | Tests application credentials, displays WebSocket connection status, and detects local ngrok tunnels |
-| Feishu tools | Registers `feishu_*` tools for the Agent; availability depends on application permissions and access to the target resources |
+| User isolation | Denies unauthorized users by default; separate user workspaces and SQLite databases, with separate context per chat |
+| Session controls | `/new`, `/whoami`, `/help`, `/status`; sessions use the display name set by the administrator |
+| History | Timestamped records; Agent tools can search, read, add notes, update, and soft-delete records belonging to the current user and chat |
+| Daily reset | Starts a fresh context at 04:00 Asia/Macau by default; waits for running work to finish and retains history |
 
-The Feishu tools cover APIs for messages, group chats, contacts, documents, spreadsheets, calendars, tasks, Bitable, and cloud storage. Permission to receive messages does not automatically grant access to these tools. Grant the permissions required by each API you intend to use. See the tool definitions in [lib/index.js](lib/index.js).
+**Remote Feishu sessions only receive restricted workspace-file and personal-history tools.** Arbitrary shell execution, general MCP tools, and Feishu APIs that could access other users’ data are not exposed. Workspace-write only applies to the user’s own directory; read-only forbids workspace file changes. Each authorized user can override the default with read-only or workspace-write; an omitted override inherits the global preset. The local Harness administrator retains control of the host and stored data.
 
 ### Examples
 
@@ -52,15 +55,15 @@ Send the bot a direct message in Feishu:
 
 Or add the bot to a group and @mention it:
 
-> Review the uncommitted changes in the working directory and list any issues that need attention.
+> Update the proposal in my working directory using the requirements we discussed earlier.
 
-A corresponding session appears in Harness, and the plugin sends the final text reply when processing finishes. These are natural-language request examples; the result depends on the model, Agent preset, working directory, and permissions. Each message currently starts a separate session, so include any necessary context in your next message.
+A corresponding session appears in Harness, and the plugin sends the final text reply when processing finishes. These are natural-language request examples; the result depends on the model, Agent preset, working directory, and permissions. Follow-up messages in the same chat reuse context. `/new` routes subsequent messages into a new session; it does not cancel running work. New work waits for the old task to finish.
 
 ## Quick start
 
 ### 1. Prepare your environment
 
-- Node.js **22 or later**, npm, and Git.
+- Node.js **22.13 or later**, npm, and Git. History storage uses built-in `node:sqlite`.
 - A working DeepSeek Harness installation with a model configured and able to answer in the web interface.
 - A Feishu enterprise custom app with bot capability enabled, plus its App ID and App Secret.
 
@@ -92,7 +95,7 @@ The installer links this checkout into the Harness `web` profile and adds the re
 
 ### 3. Choose a connection mode
 
-Enter your App ID, App Secret, the absolute path to an existing working directory, and an Agent preset. Then choose how to receive events:
+Enter your App ID, App Secret, the absolute path to an existing dedicated user-workspace root, and an Agent preset. Then choose how to receive events:
 
 | Item | Developer server (Webhook) | Persistent connection (WebSocket) |
 | --- | --- | --- |
@@ -120,7 +123,9 @@ See the **[Feishu setup guide (Chinese)](docs/setup.md)** for field descriptions
 
 ### 4. Verify your first reply
 
-Send the bot a simple text message in a Feishu direct chat. Confirm that a session appears in Harness and that a final reply arrives in Feishu. For a group chat test, add the bot to the group and @mention it.
+Send `/whoami` in a direct chat to obtain your application-specific `open_id`. In the local settings, the administrator adds a line containing `open_id Display Name` to the authorized-users field and saves. **An empty list denies all ordinary tasks.** `/whoami` remains available to unauthorized senders to identify themselves.
+
+Then send a simple message, verify the named Harness session and final Feishu reply, and send a follow-up to check continuity. Use `/new` to test switching sessions. For group chats, add the bot and @mention it.
 
 A successful credential test confirms application authentication. Saving the request URL successfully confirms URL verification. A connected WebSocket confirms that a connection has been established. Only an actual bot reply verifies the complete flow.
 
@@ -132,21 +137,25 @@ A successful credential test confirms application authentication. Saving the req
 | Public endpoint provider | `ngrok`; Webhook settings also offer Cloudflare Tunnel and a custom public URL |
 | Callback path | `/webhook/feishu` |
 | Agent preset | `standard`; it must already be installed in Harness |
-| Permission preset | `workspace-write`; you can select other presets, such as read-only, in the settings page |
-| Working directory | The source installer initializes this to the checkout's parent directory; change it to your project directory before first use |
+| Permission preset | `workspace-write`; `read-only` is the only alternative, and full-access presets are rejected |
+| Working directory | A root for separate user subdirectories; select a dedicated empty directory before first use |
+| Authorized users | Empty by default; the administrator must add each user’s `open_id` and display name |
+| Daily context reset | `04:00` in `Asia/Macau`; deferred until running work finishes, retaining history |
 | Model | Uses the default Harness model configuration unless specified separately |
 | Non-secret configuration | Stored in `feishu-bot.json` under `DSH_HOME`; the default `DSH_HOME` is `~/.dsh` |
 | Secrets | Saved by the Harness credentials service; blank settings fields preserve existing values. Values supplied through environment variables must be changed in the startup environment |
 
-The bot executes requests using the selected working directory and permissions. The plugin currently has no separate user or group allowlist. Set an appropriate app availability scope in Feishu and choose a permission preset suitable for your tasks.
+Databases are separated by stable tenant and user identity, rather than editable display names. Each chat has independent context. History tools are restricted to records for the current user and chat, with timestamps stored in local SQLite databases.
+
+Ask the Agent to find an older discussion, add a project note, or correct a record. Updating or soft-deleting history does not rewrite original Harness logs, Feishu messages, or already-loaded model context. Send `/new` to refresh context afterward. History CRUD is not a full data-erasure mechanism.
 
 ## Support boundaries and verification status
 
-The chat entry point currently supports text messages and final text replies. It does not yet support image/file input, streaming output, conversation continuity across messages, or plugin slash commands. Message deduplication and reply associations are held in process memory; restarting does not restore undelivered replies.
+The chat entry point currently supports text messages and final text replies. It does not yet support image/file input or streaming output. History is persisted, but it is not a reliable delivery queue; restarting during a task does not guarantee recovery of undelivered replies.
 
-Apart from `im.message.receive_v1`, the plugin does not handle bot join/leave events, message read/recall events, user reaction events, cloud document comments, or meeting/notes/minutes events. **`card.action.trigger` card button callbacks** and scheduled task execution are also not implemented. There is no need to subscribe to these extra events for this plugin. Adding/removing the `Typing` indicator does not require a reaction event subscription; it requires `im:message.reactions:write_only`. Publish/activate the updated app permissions in Feishu before testing. See the setup guide.
+Apart from `im.message.receive_v1`, the plugin does not handle bot join/leave events, message read/recall events, user reaction events, cloud document comments, or meeting/notes/minutes events. **`card.action.trigger` card button callbacks** and general scheduled task execution are also not implemented. Daily context reset is not an arbitrary cron scheduler. There is no need to subscribe to these extra events for this plugin. Adding/removing the `Typing` indicator does not require a reaction event subscription; it requires `im:message.reactions:write_only`. Publish/activate the updated app permissions in Feishu before testing. See the setup guide.
 
-Unit tests and local browser checks are in place. **End-to-end acceptance testing with real Feishu messages has not yet been completed.** You are welcome to try the setup guide and report your environment, reproduction steps, and sanitized logs.
+Automated tests and local checks are in place. **The 0.2.0 multi-user flow with real Feishu messages and complete cross-platform operation still require acceptance testing.** You are welcome to try the setup guide and report your environment, reproduction steps, and sanitized logs.
 
 ## Frequently asked questions
 
@@ -157,6 +166,8 @@ Unit tests and local browser checks are in place. **End-to-end acceptance testin
 See the **[troubleshooting guide (Chinese)](docs/troubleshooting.md)** for detailed steps and HTTP status codes.
 
 ## Updating and contributing
+
+**Upgrading from 0.1.4:** the empty default authorization list blocks previously unrestricted senders. Use `/whoami` and have the local administrator add each user. Replace legacy full-access permissions with read-only or workspace-write. Remote sessions no longer expose general shell, MCP, or cross-user Feishu tools. Old per-message sessions are not automatically merged or imported into the new history databases.
 
 Update from the repository directory, then restart the Harness instance that uses this plugin:
 

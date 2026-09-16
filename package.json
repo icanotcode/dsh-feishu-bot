@@ -1,7 +1,7 @@
 {
   "name": "@icanotcode/dsh-feishu-bot",
   "description": "飞书机器人：在 DeepSeek Harness 中配置飞书、接收消息并回复 Agent 结果",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -24,6 +24,7 @@
     "@deepseek-ai/cordis": "^4.0.2",
     "@deepseek-ai/dsh-credentials": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-host-webserver": "^0.1.5-rc.2",
+    "@deepseek-ai/dsh-llm": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-tools": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-webhook": "^0.1.5-rc.2"
   },
@@ -57,6 +58,6 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   }
 }

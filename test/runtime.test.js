@@ -5,7 +5,7 @@ import { createCipheriv, createHash } from 'node:crypto';
 import { assertSupportedJsonSchema, validateJsonSchemaValue } from '@deepseek-ai/dsh-tools';
 import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values';
 import { Config, createFeishuEventReceiver, createFeishuWebhookHandler, feishuTools, FeishuClient } from '../lib/index.js';
-import { installFeishuRuntime } from '../lib/runtime.js';
+import { createConversationFixture } from '../test-support/conversation-fixture.mjs';
 
 const logger = { info() {}, debug() {}, warn() {} };
 const config = { source: 'test', maxBodyBytes: 4096, verificationToken: 'TOKEN', encryptKey: 'KEY', workspacePath: '/tmp', agentPreset: 'standard', permissionPreset: 'workspace-write' };
@@ -55,27 +55,34 @@ test('encrypted signed event decrypts and tampered signature is rejected', async
   assert.equal((await api.send(body, headers)).status, 401);
 });
 
-test('real tool schema contract, session provenance and exactly one automatic reply', async () => {
-  const listeners = new Map(); const registered = []; const replies = []; let rule;
-  const ctx = { logger, on(name, handler) { listeners.set(name, handler); return () => listeners.delete(name); }, tools: { register(tool) { assertSupportedJsonSchema(tool.parameters); assertSupportedJsonSchema(tool.output.schema); registered.push(tool); return () => {}; } }, webhookRuntime: { register(value) { rule = value; return async () => {}; } } };
-  const client = { withSignal: (_signal, run) => run(), replyMessage: async (...args) => replies.push(args) };
-  const dispose = installFeishuRuntime(ctx, config, client, feishuTools, async () => ({ ok: true }));
-  assert.equal(registered.length, feishuTools.length);
+test('real tool schemas, claimed session provenance and exactly one automatic reply', async t => {
+  const app = await createConversationFixture(t, { tools: feishuTools });
+  for (const tool of app.tools.values()) {
+    assertSupportedJsonSchema(tool.parameters);
+    assertSupportedJsonSchema(tool.output.schema);
+  }
+  assert.ok(app.tools.size > feishuTools.length);
+  await app.send({ messageId: 'om_test' });
+  const agent = [...app.agents.values()][0];
+  const message = agent.queue[0];
+  assert.equal(message.source.provider, 'feishu');
+  assert.equal(message.source.kind, 'webhook');
+  assert.match(message.source.ruleId, /feishu-message-handler/);
   const signal = new AbortController().signal;
-  const request = rule.run({ source: 'test', deliveryId: 'event-1', event: { payload: { parsed: { userText: 'hello', messageId: 'om_test', chatId: 'oc_test', senderId: 'ou_test' } } } }, signal);
-  assert.equal(request.tools, undefined);
-  assert.match(request.prompt, /om_test/);
-  const tool = registered.find(tool => tool.name === 'feishu_send_message');
-  await assert.rejects(() => tool.execute({}, { signal }), /required/);
-  const value = await tool.execute({ receiveId: 'ou_test', text: 'test' }, { signal });
+  const get = app.tools.get('feishu_history_get');
+  await assert.rejects(() => get.execute({}, { agent, signal }), /required/);
+  const tool = app.tools.get('feishu_history_search');
+  const value = await tool.execute({ query: 'hello' }, { agent, signal });
   assert.deepEqual(validateJsonSchemaValue(tool.output.schema, value), []);
   assert.equal(tool.output.render({}, value)[0].type, 'text');
-  const agent = { session: { id: 'session-1', snapshotEvents: () => [{ type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: '最终答复' }] } } }] } };
-  listeners.get('agent/inbox/inserted')({ agent, message: { source: { kind: 'webhook', provider: 'feishu', source: 'test', ruleId: rule.id, deliveryId: 'event-1' } } });
-  await listeners.get('agent/turn-stopping')({ agent, turn: 1, signal });
-  await listeners.get('agent/turn-stopping')({ agent, turn: 1, signal });
-  assert.deepEqual(replies, [['om_test', '最终答复']]);
-  await dispose();
+  assert.ok(value.data.length > 0);
+  await app.emit('agent/inbox/claimed', { agent, turn: 1, message: { ...message, source: { ...message.source, provider: 'other-provider' } } });
+  await app.emit('agent/turn-stopping', { agent, turn: 1, signal });
+  assert.deepEqual(app.replies, [], 'unmatched provenance cannot claim an automatic reply');
+  await app.claim(agent);
+  await app.finish(agent, '最终答复');
+  await app.emit('agent/turn-stopping', { agent, turn: 1, signal });
+  assert.deepEqual(app.replies, [['om_test', '最终答复']]);
 });
 
 test('cached tenant token rotates immediately when credential values change', async () => {

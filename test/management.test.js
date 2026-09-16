@@ -168,3 +168,79 @@ test('connection selection persists, validates and reconciles only after success
   assert.equal((await f.service.updateConfig({ connectionMode: 'webhook' })).success, true);
   assert.equal(reconciles, 2);
 });
+
+test('user authorization and daily reset retain types, persist and support midnight and an empty allowlist', async t => {
+  let changed = 0;
+  const f = await fixture(t, new Map(), { onConfigChanged: () => { changed++; } });
+  const initial = await f.service.getConfig();
+  assert.deepEqual(initial.authorizedUsers, []);
+  assert.equal(initial.dailyResetHour, 4);
+  assert.equal(initial.dailyResetTimezone, 'Asia/Macau');
+  const authorizedUsers = [{ openId: 'ou_alice', displayName: 'Alice Example' }, { openId: 'ou_bob', displayName: '李四' }];
+  assert.equal((await f.request('/config', 'POST', { authorizedUsers, dailyResetHour: 0, dailyResetTimezone: 'UTC' })).status, 200);
+  assert.equal(changed, 1);
+  const visible = await f.service.getConfig();
+  assert.deepEqual(visible.authorizedUsers, authorizedUsers);
+  assert.equal(visible.dailyResetHour, 0);
+  const reloaded = { ...f.config, authorizedUsers: [], dailyResetHour: 4, dailyResetTimezone: 'Asia/Macau' };
+  const next = await createManagement(f.ctx, reloaded, {});
+  assert.deepEqual((await next.getConfig()).authorizedUsers, authorizedUsers);
+  assert.equal(reloaded.dailyResetHour, 0);
+  assert.equal(reloaded.dailyResetTimezone, 'UTC');
+  assert.equal((await next.updateConfig({ authorizedUsers: [] })).success, true);
+  assert.deepEqual((await next.getConfig()).authorizedUsers, []);
+  assert.deepEqual(JSON.parse(await readFile(f.config.configFile, 'utf8')).authorizedUsers, []);
+});
+
+test('invalid authorization, timezone and permissions reject before any credential or config mutation', async t => {
+  let changed = 0;
+  const f = await fixture(t, new Map(), { onConfigChanged: () => { changed++; } });
+  const valid = { authorizedUsers: [{ openId: 'ou_valid', displayName: '用户' }], dailyResetHour: 4, dailyResetTimezone: 'Asia/Macau' };
+  await f.service.updateConfig(valid);
+  const before = await readFile(f.config.configFile, 'utf8');
+  const invalid = [
+    ...[null, '', {}, [null], [{}], [{ openId: '', displayName: '用户' }],
+      [{ openId: '../outside', displayName: '用户' }], [{ openId: 'a'.repeat(129), displayName: '用户' }],
+      [{ openId: 'ou_valid', displayName: '' }], [{ openId: 'ou_valid', displayName: 'a'.repeat(101) }],
+      [{ openId: 'ou_valid', displayName: 'One\nTwo' }],
+      [{ openId: 'ou_valid', displayName: '用户', permissionPreset: 'danger-full-access' }],
+      [{ openId: 'ou_valid', displayName: '用户', permissionPreset: '' }],
+      [{ openId: 'ou_valid', displayName: '用户', permissionPreset: null }],
+      [{ openId: 'ou_valid', displayName: '甲' }, { openId: ' ou_valid ', displayName: '乙' }],
+    ].map(authorizedUsers => ({ authorizedUsers })),
+    ...[-1, 24, 4.5, '4', null].map(dailyResetHour => ({ dailyResetHour })),
+    ...['', 'Invalid/Timezone', null, 4].map(dailyResetTimezone => ({ dailyResetTimezone })),
+    ...['danger-full-access', 'custom', '', null].map(permissionPreset => ({ permissionPreset })),
+  ];
+  for (const input of invalid) {
+    const result = await f.request('/config', 'POST', { appSecret: 'must-not-save', agentPreset: 'changed', ...input });
+    assert.equal(result.status, 400, JSON.stringify(input));
+    assert.equal(await readFile(f.config.configFile, 'utf8'), before);
+    assert.equal(f.config.agentPreset, 'standard');
+    assert.deepEqual(f.config.authorizedUsers, valid.authorizedUsers);
+    assert.equal(f.values.size, 0);
+    assert.equal(changed, 1);
+  }
+  assert.equal((await f.request('/config', 'POST', { permissionPreset: 'read-only' })).status, 200);
+  assert.equal((await f.request('/config', 'POST', { permissionPreset: 'workspace-write' })).status, 200);
+});
+
+test('individual user permissions persist independently with omitted overrides inheriting defaults', async t => {
+  const f = await fixture(t);
+  const authorizedUsers = [
+    { openId: 'ou_read', displayName: '只读用户', permissionPreset: 'read-only' },
+    { openId: 'ou_write', displayName: '写入用户', permissionPreset: 'workspace-write' },
+    { openId: 'ou_default', displayName: '默认用户' },
+  ];
+  await f.service.updateConfig({ authorizedUsers, permissionPreset: 'read-only' });
+  assert.deepEqual((await f.service.getConfig()).authorizedUsers, authorizedUsers);
+  assert.deepEqual(JSON.parse(await readFile(f.config.configFile, 'utf8')).authorizedUsers, authorizedUsers);
+  const loaded = { ...f.config, authorizedUsers: [] };
+  const restarted = await createManagement(f.ctx, loaded, {});
+  assert.deepEqual((await restarted.getConfig()).authorizedUsers, authorizedUsers);
+  const updated = [{ ...authorizedUsers[0], displayName: '新名字' }, authorizedUsers[1], authorizedUsers[2]];
+  await restarted.updateConfig({ authorizedUsers: updated });
+  assert.equal(loaded.authorizedUsers[0].permissionPreset, 'read-only');
+  await restarted.updateConfig({ authorizedUsers: [{ openId: 'ou_read', displayName: '新名字' }] });
+  assert.equal('permissionPreset' in loaded.authorizedUsers[0], false);
+});
