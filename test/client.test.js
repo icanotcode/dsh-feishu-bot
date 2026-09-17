@@ -661,7 +661,7 @@ test('bound App ID is read-only with accurate guidance while unbound apps remain
 
 
 async function openProjects(f, key = 'workspacePath') {
-  f.field(key).props.onClick();
+  f.field(`${key}-search`).props.onClick();
   await f.settle();
 }
 function projectOptions(f) { return f.nodes().filter(node => node.props.role === 'option'); }
@@ -748,6 +748,41 @@ test('project picker reports unmatched searches and stale requests cannot switch
   assert.match(f.text(), /正在读取 Harness 项目/);
   f.edit('bot', 'b'); await f.settle();
   resume(); await f.settle();
+  assert.equal(f.field('workspacePath').props.value, '/projects/b');
+  assert.equal(f.field('workspacePath').props['aria-expanded'], false);
+  assert.equal(f.requests.filter(r => r.method === 'POST').length, 0);
+});
+
+
+test('directory field opens only the list; the separate search icon reveals and filters that list', async t => {
+  const f = await fixture(t, { workspacePath: '/projects/a' }, { projects: [
+    { path: '/projects/a', name: '甲项目', available: true, botId: 'default' },
+    { path: '/projects/b', name: '乙项目', available: true }
+  ] });
+  f.field('workspacePath').props.onClick();
+  await f.settle();
+  assert.equal(f.field('workspacePath').props['aria-expanded'], true);
+  assert.equal(f.field('workspacePath-query'), undefined);
+  assert.equal(projectOptions(f).length, 2);
+  assert.equal(f.field('workspacePath-search').props['aria-expanded'], false);
+  f.field('workspacePath-search').props.onClick();
+  await f.settle();
+  assert.ok(f.field('workspacePath-query'));
+  f.edit('workspacePath-query', '乙');
+  assert.equal(projectOptions(f).length, 1);
+  assert.match(f.text(projectOptions(f)[0]), /乙项目/);
+  // Clicking the directory field exits search and shows every option again.
+  f.field('workspacePath').props.onClick();
+  f.render();
+  assert.equal(f.field('workspacePath-query'), undefined);
+  assert.equal(projectOptions(f).length, 2);
+  assert.equal(f.field('workspacePath').props.value, '/projects/a');
+  f.field('workspacePath').props.onKeyDown({ key: 'ArrowDown', preventDefault() {} });
+  f.render();
+  projectOptions(f)[0].props.onKeyDown({ key: 'ArrowDown', preventDefault() {} });
+  f.render();
+  projectOptions(f)[1].props.onKeyDown({ key: 'Enter', preventDefault() {} });
+  f.render();
   assert.equal(f.field('workspacePath').props.value, '/projects/b');
   assert.equal(f.field('workspacePath').props['aria-expanded'], false);
   assert.equal(f.requests.filter(r => r.method === 'POST').length, 0);
