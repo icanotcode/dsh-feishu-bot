@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { createServer } from 'node:net';
+import { checkNodeVersion, parseSetupArgs } from '../scripts/setup.mjs';
 import { findHarnessEntry } from '../scripts/harness-entry.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -218,4 +220,113 @@ test('Harness entry honors explicit JS and native executables and rejects Window
   for (const entry of ['C:/Harness/dsh', 'C:/Harness/dsh.cmd', 'C:/Harness/dsh.bat']) {
     await assert.rejects(findHarnessEntry({ env: { DSH_BIN: entry }, platform: 'win32' }), /DSH_BIN/);
   }
+});
+
+
+test('setup validates supported Node versions and explicit launch options', () => {
+  for (const version of ['22.13.0', '22.20.0', '24.0.0', '26.0.0']) assert.doesNotThrow(() => checkNodeVersion(version));
+  for (const version of ['20.19.0', '22.12.9', 'invalid']) assert.throws(() => checkNodeVersion(version), /22.13/);
+  assert.deepEqual(parseSetupArgs(['--port', '4321', '--no-start']), { noStart: true, port: 4321, host: '127.0.0.1', help: false });
+  for (const args of [['--port'], ['--port', '0'], ['--port', '65536'], ['--port', '2.5'], ['--host', '--no-start'], ['--host', 'http://localhost'], ['--unknown']]) {
+    assert.throws(() => parseSetupArgs(args));
+  }
+});
+
+async function fakeHarness(f, body = 'process.exit(0);') {
+  const executable = join(f.dir, 'fake harness entry.cjs');
+  await writeFile(executable, body);
+  return executable;
+}
+
+async function listenLocal(t) {
+  const server = createServer(socket => socket.end());
+  await new Promise((resolveListen, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolveListen); });
+  t.after(() => new Promise(resolveClose => server.close(resolveClose)));
+  return server;
+}
+
+test('setup no-start installs into DSH_HOME idempotently without executing Harness', async t => {
+  const f = await fixture(t);
+  const marker = join(f.dir, 'must-not-execute');
+  const executable = await fakeHarness(f, "require('node:fs').writeFileSync(process.env.MARKER, 'executed');");
+  const env = { DSH_BIN: executable, MARKER: marker };
+  const first = f.run('setup.mjs', ['--no-start'], env);
+  assert.equal(first.status, 0, first.stderr);
+  assert.match(first.stdout, /Plugin list/);
+  assert.match(first.stdout, /未启动/);
+  const files = await readdir(f.profile);
+  const second = f.run('setup.mjs', ['--no-start'], env);
+  assert.equal(second.status, 0, second.stderr);
+  assert.deepEqual(await readdir(f.profile), files);
+  await assert.rejects(access(marker));
+  await assert.rejects(access(join(f.plugin, '.runtime')));
+});
+
+test('setup rejects a missing Harness before changing the profile', async t => {
+  const f = await fixture(t);
+  const result = f.run('setup.mjs', ['--no-start'], { DSH_BIN: join(f.dir, 'missing.cjs') });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /DSH_BIN/);
+  assert.deepEqual(await readdir(f.profile), []);
+});
+
+test('setup rejects missing dependencies before installing', async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.plugin, 'package.json'), JSON.stringify({ name: packageName, type: 'module', dependencies: { '@example/not-installed-dependency': '*' } }));
+  const result = f.run('setup.mjs', ['--no-start'], { DSH_BIN: await fakeHarness(f) });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /npm install/);
+  assert.deepEqual(await readdir(f.profile), []);
+});
+
+test('setup never treats an occupied port as a healthy Harness or starts a second process', async t => {
+  const f = await fixture(t);
+  const server = await listenLocal(t);
+  const marker = join(f.dir, 'must-not-execute');
+  const executable = await fakeHarness(f, "require('node:fs').writeFileSync(process.env.MARKER, 'executed');");
+  const result = f.run('setup.mjs', ['--port', String(server.address().port)], { DSH_BIN: executable, MARKER: marker });
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /无法仅凭端口确认/);
+  assert.match(result.stderr, /Plugin list/);
+  await assert.rejects(access(marker));
+  assert.equal(server.listening, true);
+});
+
+test('setup reuses background starter and forwards a custom port and host without a shell', async t => {
+  const f = await fixture(t);
+  const server = await listenLocal(t);
+  const port = server.address().port;
+  await new Promise(resolveClose => server.close(resolveClose));
+  const output = join(f.dir, 'started.json');
+  const executable = await fakeHarness(f, "require('node:fs').writeFileSync(process.env.ARG_OUTPUT, JSON.stringify({ args: process.argv.slice(2), home: process.env.DSH_HOME })); setInterval(() => {}, 1000);");
+  let pid;
+  try {
+    const result = f.run('setup.mjs', ['--port', String(port), '--host', '127.0.0.1'], { DSH_BIN: executable, ARG_OUTPUT: output });
+    assert.equal(result.status, 0, result.stderr);
+    pid = Number(await readFile(join(f.plugin, '.runtime', 'harness.pid'), 'utf8'));
+    const launch = JSON.parse(await readFile(output, 'utf8'));
+    assert.deepEqual(launch.args, ['web', '--no-open', '--host', '127.0.0.1', '--port', String(port)]);
+    assert.equal(launch.home, join(f.dir, 'home'));
+    assert.match(result.stdout, /启动请求已提交/);
+    assert.match(result.stdout, /服务就绪后/);
+  } finally {
+    if (!pid) pid = Number(await readFile(join(f.plugin, '.runtime', 'harness.pid'), 'utf8').catch(() => '0'));
+    if (pid) {
+      try { process.kill(pid); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+      // Let the detached child release its log handles before Windows cleanup.
+      await new Promise(resolveWait => setTimeout(resolveWait, 300));
+    }
+  }
+});
+
+test('setup propagates early startup failure and offers a retry action', async t => {
+  const f = await fixture(t);
+  const server = await listenLocal(t);
+  const port = server.address().port;
+  await new Promise(resolveClose => server.close(resolveClose));
+  const result = f.run('setup.mjs', ['--port', String(port)], { DSH_BIN: await fakeHarness(f, 'process.exit(7);') });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /启动后退出/);
+  assert.match(result.stderr, /安全重试/);
+  await assert.rejects(access(join(f.plugin, '.runtime', 'harness.pid')));
 });

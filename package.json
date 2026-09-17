@@ -43,7 +43,8 @@
     "install:harness": "node scripts/install.mjs",
     "start:harness": "node scripts/start.mjs",
     "start:ngrok": "node scripts/start-ngrok.mjs",
-    "start:cloudflare": "node scripts/start-cloudflare.mjs"
+    "start:cloudflare": "node scripts/start-cloudflare.mjs",
+    "setup:harness": "node scripts/setup.mjs"
   },
   "repository": {
     "type": "git",

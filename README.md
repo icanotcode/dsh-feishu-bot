@@ -42,6 +42,7 @@
 | 自动答复 | Agent 完成后向原消息回复最终文本，较长回复分段发送 |
 | Webhook 验证 | 处理地址验证、Verification Token、加密请求解密和签名校验 |
 | 公网接入 | Webhook 可选 ngrok、Cloudflare Tunnel 或自定义 HTTPS 地址；ngrok / Cloudflare 可在面板启动并守护 |
+| 快速配置 | 保存后检查应用凭据、项目目录与接入配置，尝试启动已配置的托管隧道，逐项列出结果和飞书后台待办 |
 | 连接检查 | 测试应用凭据、显示长连接状态、检测本机 ngrok 隧道 |
 | 用户接入 | 飞书后台控制应用可用范围；首次对话必须提供并确认姓名，无需预填 `open_id` 或用户名 |
 | 用户隔离 | 每用户独立工作目录及 SQLite 数据库，不同聊天上下文分开；重名不会合并数据 |
@@ -117,15 +118,14 @@ npm install -g @deepseek-ai/dsh
 git clone https://github.com/icanotcode/dsh-feishu-bot.git
 cd dsh-feishu-bot
 npm ci
-npm run install:harness
-npm run start:harness
+npm run setup:harness
 ```
 
 打开启动日志给出的本机地址，默认端口为 `3080`。进入 **设置 → 插件 → Plugin list**，搜索 `feishu`，展开 **Global plugins（全局插件）** 中的 `feishu-bot` 卡片，即可直接配置。插件仅保留此入口，不再添加独立的飞书标签页或侧栏菜单。
 
-安装脚本将当前仓库链接到 Harness 的 `web` profile，并补充所需的 Webhook 运行时，修改已有配置前会备份。**安装后请保留仓库目录。** 已有实例占用端口时，先在原启动终端停止该实例；启动脚本不会自动停止服务。自定义 `DSH_HOME` 时，安装和启动必须使用相同的值。
+`setup:harness` 检查 Node.js 和 Harness，复用安装脚本把当前仓库链接到 `web` profile、补充 Webhook 运行时，再启动 Harness；可重复运行，修改已有配置前会备份。**安装后请保留仓库目录。** 已有实例占用端口时不会终止它，也不会将“端口已有服务”当作插件配置完成；按提示在原终端停止旧实例后重新运行。需要分步操作时仍可使用 `install:harness` 和 `start:harness`。自定义 `DSH_HOME` 时，安装和启动必须使用相同的值。
 
-### 3. 选择接入方式
+### 3. 填写信息并一键配置
 
 先填写 App ID、App Secret 和 Agent 预设，并在「任务处理」中点击 **搜索项目**，按名称或路径检索并选择项目目录，再选择接收方式。列表来自 Harness 已添加的项目及机器人已绑定目录，不扫描磁盘。插件只在所选项目的 `.feishu-users/` 下为每位用户创建独立目录，不直接共享项目已有文件：
 
@@ -137,6 +137,10 @@ npm run start:harness
 | 回调验证配置 | Verification Token；启用加密时还需 Encrypt Key | 不需要 Token / Encrypt Key |
 | 飞书后台订阅方式 | 将事件发送至开发者服务器 | 使用长连接接收事件 |
 | 当前实现默认值 | 默认接收方式 | 在设置页选择后保存 |
+
+填写所选模式需要的字段后，在卡片的 **快速配置** 区点击 **保存并一键配置**。插件先保存，再逐项检查应用凭据、项目目录、接收方式及 Webhook 验证配置和公网地址；对已配置的 ngrok／Cloudflare 托管隧道尝试启动，并显示需要在飞书后台完成的操作链接。已选择的接收方式保持不变；长连接不需要启动隧道。高级设置仍保留，需要时再调整。
+
+按结果补齐配置，完成飞书后台的权限、事件订阅和发布后，点击 **重新检查**。创建飞书应用、授予权限、发布版本、安装隧道程序、购买或充值外部服务仍由管理员完成；检查通过不能代替真实消息验收。
 
 两种模式均需订阅 **接收消息 `im.message.receive_v1`**，开通接收和回复消息的权限，并完成飞书应用版本的发布/生效流程。
 

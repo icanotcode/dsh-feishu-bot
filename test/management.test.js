@@ -54,7 +54,7 @@ test('configuration persists across recreation, keeps blank secrets and never re
 
 test('all management routes reject untrusted requests before reads or writes', async t => {
   const f = await fixture(t);
-  for (const path of ['/config', '/test', '/ngrok/start', '/ngrok/stop', '/ngrok/status', '/tunnel/status', '/tunnel/start', '/tunnel/stop', '/webhook-url', '/connection/status']) {
+  for (const path of ['/config', '/test', '/setup/check', '/setup/repair', '/ngrok/start', '/ngrok/stop', '/ngrok/status', '/tunnel/status', '/tunnel/start', '/tunnel/stop', '/webhook-url', '/connection/status']) {
     const result = await f.request(path, 'POST', { appSecret: 'must-not-save' }, { host: 'public-tunnel.example' });
     assert.equal(result.status, 403);
   }
@@ -455,4 +455,67 @@ test('catalog serialization orders complete cross-bot saves and disposal drains 
   assert.deepEqual(order, ['primary-start', 'primary-end', 'secondary']);
   assert.equal(disposed, true);
   assert.equal(primary.values.get(secondaryRefs.appIdEnv), 'cli_secondary');
+});
+
+test('setup endpoints use saved values and keep each bot authenticated on its own route', async t => {
+  const primary = await fixture(t, new Map(), {}, { connectionMode: 'websocket' });
+  const secondary = await fixture(t, primary.values, { routePrefix: '/api/feishu-bot/bots/example', sharedTunnel: primary.service }, { ...secondaryRefs, connectionMode: 'websocket' });
+  for (const current of [primary, secondary]) {
+    for (const path of ['/setup/check', '/setup/repair']) {
+      assert.equal((await current.request(path, 'GET')).status, 405);
+      assert.equal((await current.request(path, 'POST', {}, { cookie: '' })).status, 403);
+      const result = await current.request(path, 'POST', { appId: 'untrusted-unsaved', appSecret: 'do-not-use' });
+      assert.equal(result.status, 200);
+      assert.equal(result.body.ready, false);
+      assert.equal(result.body.checks.find(item => item.id === 'app').state, 'action');
+      assert.equal(result.body.callbackUrl, undefined);
+    }
+  }
+  assert.equal(primary.values.size, 0);
+});
+
+test('setup repair serializes its chosen tunnel start with settings changes', async t => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  let started;
+  const startEntered = new Promise(resolve => { started = resolve; });
+  let f;
+  const supervisor = {
+    status: async () => ({ state: 'idle', managed: false, running: false }),
+    start: async () => {
+      assert.equal(f.config.tunnelProvider, 'cloudflare');
+      started();
+      await gate;
+      assert.equal(f.config.tunnelProvider, 'cloudflare');
+      return { state: 'starting', managed: true };
+    },
+    reconcile: async () => {}, dispose: async () => {},
+  };
+  f = await fixture(t, new Map(), { tunnelSupervisor: supervisor }, { tunnelProvider: 'cloudflare', cloudflareMode: 'quick' });
+  const pending = f.service.repairSetup();
+  await startEntered;
+  const update = f.service.updateConfig({ tunnelProvider: 'custom', publicBaseUrl: 'https://custom.example' });
+  release();
+  const [report] = await Promise.all([pending, update]);
+  assert.deepEqual(report.repaired, ['tunnel-start-requested']);
+  assert.equal(f.config.tunnelProvider, 'custom');
+});
+
+test('default long-connection setup repair honors server-wide webhook tunnel demand', async t => {
+  let required = true;
+  let starts = 0;
+  const supervisor = {
+    status: async () => ({ state: 'idle', managed: false, running: false }),
+    start: async () => { starts++; return { state: 'starting', managed: true }; },
+    reconcile: async () => {}, dispose: async () => {},
+  };
+  const primary = await fixture(t, new Map(), { isTunnelRequired: () => required, tunnelSupervisor: supervisor }, { connectionMode: 'websocket', tunnelProvider: 'cloudflare' });
+  const report = (await primary.request('/setup/repair', 'POST', {})).body;
+  assert.deepEqual(report.repaired, ['tunnel-start-requested']);
+  assert.equal(starts, 1);
+  assert.equal(report.callbackUrl, undefined);
+  assert.match(report.checks.find(item => item.id === 'tunnel').message, /其他机器人/);
+  required = false;
+  assert.deepEqual((await primary.service.repairSetup()).repaired, []);
+  assert.equal(starts, 1);
 });

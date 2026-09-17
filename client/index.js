@@ -301,6 +301,8 @@ window.__ModuleLoader__.load({
       const [savedConfig, setSavedConfig] = useState(defaults);
       const [reload, setReload] = useState(0);
       const [connected, setConnected] = useState(false);
+      const [setupReport, setSetupReport] = useState(null);
+      const [setupPhase, setSetupPhase] = useState('');
       const [secretFlags, setSecretFlags] = useState({});
       const [sharedTunnel, setSharedTunnel] = useState(botId !== 'default');
       const dirty = Object.keys(defaults).some(key => config[key] !== savedConfig[key]);
@@ -366,6 +368,7 @@ window.__ModuleLoader__.load({
         finally { setBusy(''); }
       }
       function edit(key, value) {
+        setSetupReport(null);
         setConfig(previous => ({ ...previous, [key]: value }));
         setConnected(false);
         setNotice(null);
@@ -386,6 +389,34 @@ window.__ModuleLoader__.load({
               placeholder: options.placeholder || (secrets.includes(key) ? '留空保留已保存的值' : '') }),
           options.hint && h('small', null, options.hint),
           secretFlags[key] && h('small', null, key === 'appId' ? '已绑定此应用；切换应用请新增机器人。' : '已保存凭证；填写新值可替换。'));
+      }
+      async function configureSetup() {
+        setSetupReport(null);
+        try {
+          setSetupPhase('正在验证应用凭据…');
+          // Validate before binding App ID permanently. Failed authentication
+          // leaves the draft intact and never starts a tunnel.
+          await botRequest('test', payload());
+          setSetupPhase('正在保存配置…');
+          await botRequest('config', payload());
+          applyConfig(await botRequest('config'));
+          setSetupPhase('正在检查配置，并尝试启动所选隧道…');
+          setSetupReport(await botRequest('setup/repair', {}));
+          await refreshStatus();
+        } finally { setSetupPhase(''); }
+      }
+      async function recheckSetup() {
+        setSetupReport(null);
+        setSetupPhase('正在重新检查已保存的配置…');
+        try {
+          setSetupReport(await botRequest('setup/check', {}));
+          await refreshStatus();
+        } finally { setSetupPhase(''); }
+      }
+      function safeSetupLink(value) {
+        // Reports are text, never HTML. Do not render arbitrary schemes or
+        // destinations if a future backend error supplies an unexpected URL.
+        return typeof value === 'string' && /^https:\/\/(?:open\.feishu\.cn|github\.com)\//.test(value) ? value : undefined;
       }
       function button(label, onClick, action, primary = false) {
         return h('button', { type: 'button', disabled: Boolean(busy), onClick,
@@ -413,16 +444,42 @@ window.__ModuleLoader__.load({
         loading ? h('p', { role: 'status' }, '正在读取配置…') : loadError
           ? h('div', { role: 'alert' }, h('p', null, loadError), button('重新加载', () => setReload(reload + 1), 'reload'))
           : h(React.Fragment, null,
+            h('section', { className: 'feishu-setup', 'aria-labelledby': `${prefix}-setup-title` },
+              h('h3', { id: `${prefix}-setup-title` }, '快速配置'),
+              h('p', null, '先填写应用凭证、选择项目与接收方式，再一键保存、检查并尝试启动已配置的隧道。已有配置可直接重新检查。'),
+              h('ol', { className: 'feishu-setup-steps' },
+                h('li', null, h('a', { href: `#${prefix}-app-section` }, '填写飞书应用凭证'), '，应用需由管理员在飞书后台创建。'),
+                h('li', null, h('a', { href: `#${prefix}-connection-section` }, '选择接收方式'), '和', h('a', { href: `#${prefix}-project-section` }, '项目目录'), '；Webhook 还需配置公网入口，长连接无需隧道。'),
+                h('li', null, '执行配置后，按下方检查结果完成飞书后台待办，并实际发送消息验收。')),
+              h('div', { className: 'feishu-actions' },
+                button('保存并一键配置', () => run('setup', configureSetup), 'setup', true),
+                h('button', { type: 'button', disabled: Boolean(busy) || dirty, onClick: () => run('setup-check', recheckSetup) }, busy === 'setup-check' ? '检查中…' : '重新检查')),
+              dirty && h('p', { className: 'feishu-muted' }, '有未保存的修改，请点击「保存并一键配置」后再复检。'),
+              setupPhase && h('p', { role: 'status', 'aria-live': 'polite' }, setupPhase),
+              h('p', { className: 'feishu-muted' }, '自动步骤不会代替你开通飞书权限、发布应用或验证真实消息；不会发送测试消息、邮件或付费模型请求。'),
+              setupReport && h('div', { className: 'feishu-setup-report', 'aria-live': 'polite' },
+                h('p', { role: 'status' }, `检查完成：${setupReport.checks.filter(item => item.state === 'ok').length} 项通过，${setupReport.checks.filter(item => item.state !== 'ok').length} 项需要处理或确认。实际收发仍需验收。`),
+                setupReport.callbackUrl && h('div', { className: 'feishu-field' },
+                  h('label', { htmlFor: `${prefix}-setup-callback` }, '当前机器人的飞书回调地址'),
+                  h('div', { className: 'feishu-actions' },
+                    h('input', { id: `${prefix}-setup-callback`, readOnly: true, value: setupReport.callbackUrl }),
+                    button('复制回调地址', () => run('setup-copy', async () => { await navigator.clipboard.writeText(setupReport.callbackUrl); setNotice({ text: '回调地址已复制，请在飞书后台保存并验证。' }); }), 'setup-copy'))),
+                h('ul', { className: 'feishu-setup-checks' }, setupReport.checks.map(item => h('li', { key: item.id, 'data-check-state': item.state },
+                  h('div', { className: 'feishu-setup-check-heading' }, h('strong', null, item.title), h('span', null, ({ ok: '已通过', action: '待处理', warning: '待确认', error: '检查失败' })[item.state] || '待确认')),
+                  h('p', null, item.message),
+                  safeSetupLink(item.action?.url) && h('a', { href: safeSetupLink(item.action.url), target: '_blank', rel: 'noopener noreferrer' }, item.action.label))))),
+              notice && h('p', { role: notice.error ? 'alert' : 'status', className: notice.error ? 'feishu-error' : 'feishu-success' }, notice.text)),
             h('form', { onSubmit: event => {
               event.preventDefault();
               run('save', async () => {
+                setSetupReport(null);
                 await botRequest('config', payload());
                 applyConfig(await botRequest('config'));
                 await refreshStatus();
                 setNotice({ text: '配置已保存。' });
               });
             } },
-              h('section', null,
+              h('section', { id: `${prefix}-connection-section` },
                 h('h3', null, '事件接收方式'),
                 field('connectionMode', '连接方式', { choices: [
                   ['webhook', '将事件发送至开发者服务器（Webhook）'], ['websocket', '使用长连接接收事件']
@@ -437,7 +494,7 @@ window.__ModuleLoader__.load({
                 config.connectionMode === 'websocket' && h('p', { className: 'feishu-muted' },
                   '长连接使用 App ID 和 App Secret，无需公网地址、公网隧道、Verification Token 或 Encrypt Key。保存后由 Harness 建立连接；在飞书后台同步选择「使用长连接接收事件」，并订阅 im.message.receive_v1。'),
                 button('刷新连接状态', () => run('status', refreshStatus), 'status')),
-              h('section', null,
+              h('section', { id: `${prefix}-app-section` },
                 h('h3', null, '应用凭证'),
                 field('appId', 'App ID', { placeholder: 'cli_xxxxxxxxxxxxxxxx', hint: '在飞书开放平台的「凭证与基础信息」中获取。' }),
                 field('appSecret', 'App Secret'),
@@ -451,7 +508,7 @@ window.__ModuleLoader__.load({
                     setNotice({ text: '飞书凭证验证成功。修改后的配置仍需保存。' });
                   }), 'test'),
                   h('span', { className: 'feishu-muted' }, connected ? '凭证验证成功' : '尚未验证当前配置'))),
-              h('section', null,
+              h('section', { id: `${prefix}-project-section` },
                 h('h3', null, '任务处理'),
                 h('p', { className: 'feishu-muted' }, '处理任务时会给原消息添加 Typing（敲键盘）表情，结束后移除。需要应用权限 im:message.reactions:write_only；请在飞书开放平台开通并发布生效。缺少权限时仍会处理消息，但无法显示状态表情。'),
                 h(ProjectPicker, { id: `${prefix}-workspacePath`, label: '项目目录（用户工作目录根路径）', value: config.workspacePath, botId, disabled: Boolean(busy), onChange: value => edit('workspacePath', value) }),
@@ -559,7 +616,6 @@ window.__ModuleLoader__.load({
                   button('刷新状态', () => run('status', refreshStatus), 'status'))),
               h('div', { className: 'feishu-actions' },
                 h('button', { type: 'submit', disabled: Boolean(busy), className: 'feishu-primary' }, busy === 'save' ? '保存中…' : '保存配置'))),
-            notice && h('p', { role: notice.error ? 'alert' : 'status', className: notice.error ? 'feishu-error' : 'feishu-success' }, notice.text),
             h('p', { className: 'feishu-muted' }, '每日上下文切换由插件管理，其他通用定时任务尚未接入执行器。'),
             h('a', { href: 'https://open.feishu.cn/app', target: '_blank', rel: 'noopener noreferrer' }, '打开飞书开放平台')));
     }
@@ -570,6 +626,9 @@ window.__ModuleLoader__.load({
       .feishu-settings{max-width:760px;padding:8px 4px 24px;color:var(--dsw-alias-label-primary,#202124);font-size:14px;line-height:1.6}
       .feishu-settings *{box-sizing:border-box}.feishu-settings h2{margin:0 0 4px;font-size:21px}.feishu-settings h3{margin:0 0 16px;font-size:16px}
       .feishu-settings section{border:1px solid var(--dsw-alias-border-l2,#ddd);border-radius:12px;padding:18px;margin:20px 0}
+      .feishu-setup{background:var(--dsw-alias-bg-layer-2,#f6f8fc)}.feishu-setup-steps{padding-left:22px}.feishu-setup-steps li{margin:8px 0}
+      .feishu-setup-checks{list-style:none;padding:0 4px 0 0;margin:12px 0;max-height:420px;overflow:auto;overscroll-behavior:contain}.feishu-setup-checks>li{padding:12px 0;border-top:1px solid var(--dsw-alias-border-l2,#ddd)}.feishu-setup-checks p{margin:5px 0;overflow-wrap:anywhere}
+      .feishu-setup-check-heading{display:flex;gap:12px;justify-content:space-between}.feishu-setup-check-heading span{flex-shrink:0;color:var(--dsw-alias-label-secondary,#686a70)}.feishu-setup-checks [data-check-state=ok] .feishu-setup-check-heading span{color:#258047}.feishu-setup-checks [data-check-state=error] .feishu-setup-check-heading span{color:var(--dsw-alias-label-error,#ba3030)}
       .feishu-field{display:flex;flex-direction:column;gap:6px;margin:14px 0}.feishu-settings label{font-weight:500}
       .feishu-settings input,.feishu-settings select,.feishu-settings textarea{width:100%;min-width:0;border:1px solid var(--dsw-alias-border-l4,#ccc);border-radius:8px;background:var(--dsw-alias-bg-layer-3,#fff);color:inherit;padding:9px 11px;font:inherit}
       .feishu-settings textarea{resize:vertical}

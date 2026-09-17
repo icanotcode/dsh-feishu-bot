@@ -42,6 +42,7 @@ Current multi-bot settings captured in an isolated test instance, showing select
 | Automatic replies | Replies to the original message with the Agent's final text; splits long replies into multiple messages |
 | Webhook verification | Handles URL verification, Verification Token checks, encrypted payload decryption, and signature verification |
 | Public endpoints | Webhook supports ngrok, Cloudflare Tunnel, or a custom HTTPS address; ngrok / Cloudflare can be launched and supervised from the panel |
+| Quick setup | Saves and checks credentials, project directory and connection settings; attempts to start a configured managed tunnel and lists results and Feishu console actions |
 | Connection checks | Tests application credentials, displays WebSocket connection status, and detects local ngrok tunnels |
 | User access | Feishu app availability controls access; each user must provide and confirm a name before tasks, with no prefilled `open_id` or name list |
 | User isolation | Separate user workspaces and SQLite databases, with separate context per chat; identical names do not merge data |
@@ -119,15 +120,14 @@ npm install -g @deepseek-ai/dsh
 git clone https://github.com/icanotcode/dsh-feishu-bot.git
 cd dsh-feishu-bot
 npm ci
-npm run install:harness
-npm run start:harness
+npm run setup:harness
 ```
 
 Open the local URL printed in the startup log; the default port is `3080`. Open **Settings → Plugins → Plugin list**, search for `feishu`, and expand the `feishu-bot` card under **Global plugins** to configure it directly. This is the only entry; the plugin no longer adds a separate Feishu tab or sidebar item.
 
-The installer links this checkout into the Harness `web` profile and adds the required Webhook runtime. It backs up existing configuration before modifying it. **Keep the repository directory after installation.** If another instance already occupies the port, stop that instance in its original terminal first; the startup script does not stop services automatically. If you customize `DSH_HOME`, use the same value for installation and startup.
+`setup:harness` checks Node.js and Harness, runs the repeatable installer to link this checkout into the `web` profile and add the Webhook runtime, then starts Harness. Existing configuration is backed up before changes. **Keep the repository directory after installation.** An occupied port does not cause an existing process to be terminated or count as successful plugin setup: follow the prompt to stop the old instance in its original terminal before trying again. The separate `install:harness` and `start:harness` commands remain available. If you customize `DSH_HOME`, use the same value for installation and startup.
 
-### 3. Choose a connection mode
+### 3. Enter your settings and run quick setup
 
 Enter your App ID, App Secret, and Agent preset. In **任务处理**, click **搜索项目**, search by project name or path, and select a project directory. The list contains projects added to Harness and directories already bound to bots; it does not scan the disk. Users remain restricted to their own directories under the selected project’s `.feishu-users/`, without access to existing project files. Then choose how to receive events:
 
@@ -139,6 +139,10 @@ Enter your App ID, App Secret, and Agent preset. In **任务处理**, click **�
 | Callback verification | Verification Token; Encrypt Key is also needed when encryption is enabled | Token / Encrypt Key not required |
 | Feishu console subscription method | Send events to a developer server | Receive events through a persistent connection |
 | Selection | Default mode | Select in the settings page and save |
+
+After filling in the fields required by your chosen mode, click **保存并一键配置** (Save and configure) in the card’s **快速配置** (Quick setup) section. The plugin saves your settings, checks credentials, the project directory and connection settings, and attempts to start a configured ngrok or Cloudflare managed tunnel. Results include links to the remaining Feishu console actions. Your selected transport is preserved; WebSocket setup requires no tunnel. Advanced settings remain available.
+
+Complete any missing settings and the Feishu console steps, then click **重新检查** (Check again). Administrators still create the Feishu app, grant permissions, publish its version, install tunnel binaries and purchase or fund external services. Passing these checks does not replace a real message-and-reply test.
 
 Both modes require subscribing to **Receive message (`im.message.receive_v1`)**, granting permission to receive and reply to messages, and completing Feishu's app version publishing/activation process.
 
