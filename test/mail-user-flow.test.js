@@ -69,7 +69,8 @@ test('unavailable discovery and failed TLS probing keep the task without asking 
     await app.handle('/mail setup', { pendingRequest: { messageId: 'send-original', requestText: 'Send the report.' } });
     await app.handle('sender@company.example');
     const failed = await app.flow.discover(alice, { chatId: 'private-a' });
-    assert.match(failed.reply, /\/mail retry/);
+    assert.equal(failed.webSearchRequired, true);
+    assert.match(failed.reply, /搜索/);
     assert.doesNotMatch(failed.reply, /\/mail server|private diagnostic/);
     assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_discovery');
     assert.equal((await app.handle('/mail retry')).discover, true);
@@ -532,4 +533,41 @@ test('malformed or secret-bearing pending request metadata fails closed', async 
   app.values.set(ref, { source: 'store', value: JSON.stringify(stored) });
   assert.match((await app.handle('sender@qq.com')).reply, /凭据服务/);
   await assert.rejects(app.flow.getIngressState(alice), /凭据服务/);
+});
+
+test('web evidence is isolated by user and chat, invalidated by reset, and failures never advance to code', async () => {
+  const { createMailWebResearch } = await import('../lib/mail-web-research.js');
+  let failProbe = true;
+  const excerpt = 'SMTP smtp.company.example port 465 TLS';
+  const app = fixture({ researchFactory: () => createMailWebResearch({
+    resolveMx: async () => [],
+    search: async () => ({ status: 'found', results: [{ url: 'https://company.example/help' }] }),
+    fetchText: async () => excerpt,
+  }), probe: async () => { if (failProbe) throw new Error('connection unavailable'); } });
+  for (const identity of [alice, bob]) { await app.handle('/mail', {}, identity); await app.handle('same@company.example', {}, identity); }
+  const found = await app.flow.webSearch(alice, { chatId: 'private-a' });
+  await assert.rejects(app.flow.webRead(alice, found.results[0].id, { chatId: 'other-chat' }), /原私聊/);
+  await assert.rejects(app.flow.webRead(bob, found.results[0].id, { chatId: 'private-a' }));
+  const page = await app.flow.webRead(alice, found.results[0].id, { chatId: 'private-a' });
+  const proposal = { pageId: page.pageId, host: 'smtp.company.example', port: 465, mode: 'tls', excerpt };
+  await assert.rejects(app.flow.webApply(alice, proposal, { chatId: 'private-a' }));
+  assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_discovery');
+  failProbe = false;
+  await assert.rejects(app.flow.webApply(alice, proposal, { chatId: 'private-a', checkActive: () => { throw new Error('ended'); } }), /ended/);
+  assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_discovery');
+  await app.handle('/mail reset'); await app.handle('/mail'); await app.handle('same@company.example');
+  await assert.rejects(app.flow.webApply(alice, proposal, { chatId: 'private-a' }));
+  assert.equal(app.verified.length, 0);
+});
+
+test('unavailable web service retains the request and never asks users for technical settings', async () => {
+  const app = fixture();
+  await app.handle('/mail setup', { pendingRequest: { messageId: 'pending-web', requestText: 'Send report.' } });
+  await app.handle('sender@company.example');
+  const result = await app.flow.webSearch(alice, { chatId: 'private-a' });
+  assert.equal(result.status, 'unavailable');
+  assert.match(result.reply, /已保留/);
+  assert.doesNotMatch(result.reply, /\/mail server|465 tls/);
+  assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_discovery');
+  assert.match(JSON.stringify([...app.values]), /pending-web/);
 });

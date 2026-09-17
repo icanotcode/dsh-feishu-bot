@@ -473,7 +473,7 @@ window.__ModuleLoader__.load({
                 h('p', { className: 'feishu-muted' }, '每位飞书用户独立绑定自己的邮箱。首次要求发邮件时，输入邮箱后由智能体自动查找发信配置，再询问授权码并继续当前发送任务；无需填写服务器、端口或加密方式，普通聊天无需配置。'),
                 h('p', null, '在机器人私聊中发送 ', h('code', null, '/mail'), ' 也可单独配置邮箱。已明确的收件人无需重复填写，缺少时再补问；仅配置邮箱不会自动发信。'),
                 h('p', { className: 'feishu-muted' }, h('code', null, '/mail status'), ' 查看状态；', h('code', null, '/mail retry'), ' 重新查找发信配置；', h('code', null, '/mail to 收件邮箱'), ' 更换收件人；', h('code', null, '/mail reset'), ' 清除自己的邮箱绑定。'),
-                h('p', { className: 'feishu-muted' }, '未知域名会在线查询发信配置；暂无可靠配置或网络不通时保留发送任务并支持重试，不能保证所有邮箱都能识别。高级用户仍可手动覆盖。邮箱服务须支持授权码认证，不支持 OAuth 登录或收件箱读取。授权码在进入模型和普通历史前由插件截取；飞书聊天记录本身不由插件清除。')),
+                h('p', { className: 'feishu-muted' }, '未知域名先查询公开配置，未找到时由智能体搜索服务商官网，核实资料并验证连接后使用。网页搜索需要 Harness 已配置可用的搜索服务；搜索不可用、暂无可靠资料或网络不通时保留发送任务并支持重试，不能保证所有邮箱都能识别。高级用户仍可手动覆盖。邮箱服务须支持授权码认证，不支持 OAuth 登录或收件箱读取。授权码在进入模型和普通历史前由插件截取；飞书聊天记录本身不由插件清除。')),
               (config.connectionMode === 'webhook' || (!sharedTunnel && config.serverTunnelRequired)) && h('section', null,
                 h('h3', null, config.connectionMode === 'webhook' ? 'Webhook 与公网地址' : '服务器共享公网隧道'),
                 h('label', { htmlFor: `${prefix}-harness-port` }, '当前 Harness 监听端口'),

@@ -219,3 +219,52 @@ test('unknown domains automatically enter Agent discovery and continue sending a
   assert.equal(f.sends[0][3].publicOnly, true);
   assert.deepEqual(f.sends[0][2].to, ['recipient@example.com']);
 });
+
+test('web search fallback reads official evidence, probes without a code and resumes the original send exactly once', async t => {
+  const { createMailWebResearch } = await import('../lib/mail-web-research.js');
+  const queries = [], reads = [], probes = [];
+  const excerpt = 'SMTP server submission.enterprise.example port 587 STARTTLS';
+  const f = await fixture(t, { flow: {
+    discover: async () => ({ status: 'not_found' }),
+    researchFactory: () => createMailWebResearch({
+      resolveMx: async () => [],
+      search: async domain => { queries.push(domain); return { status: 'found', results: [{ url: 'https://help.enterprise.example/mail', snippet: 'not configuration evidence' }] }; },
+      fetchText: async (url, options) => { reads.push(url); assert.equal(options.validateUrl(new URL(url)), true); return `<p>${excerpt}</p>`; },
+    }),
+    probe: async (...args) => { probes.push(args); return { verified: true }; },
+  } });
+  const original = '发送到 recipient@example.com，主题 Web，正文 Original request.';
+  const agent = await f.active('alice', 'chat-a', original, 'web-original-send');
+  await f.execute('feishu_mail_setup', agent, { resumeSend: true, recipient: 'recipient@example.com' });
+  await f.finish(agent);
+  await f.send({ text: 'sender@enterprise.example' });
+  assert.match(JSON.stringify(agent.queue), /feishu_mail_web_search/);
+  await f.claim(agent);
+  assert.equal((await f.execute('feishu_mail_discover', agent)).data.webSearchRequired, true);
+  await assert.rejects(f.execute('feishu_mail_web_search', agent, { query: 'user secret' }), /additional|unexpected|unknown|allowed/i);
+  const results = (await f.execute('feishu_mail_web_search', agent)).data;
+  assert.equal(results.status, 'found');
+  const page = (await f.execute('feishu_mail_web_read', agent, { resultId: results.results[0].id })).data;
+  const proposal = { pageId: page.pageId, host: 'submission.enterprise.example', port: 587, mode: 'starttls', excerpt };
+  await assert.rejects(f.execute('feishu_mail_web_apply', agent, { ...proposal, host: 'attacker.example' }));
+  assert.equal(probes.length, 0);
+  const applied = (await f.execute('feishu_mail_web_apply', agent, proposal)).data;
+  assert.match(applied.reply, /授权码/);
+  assert.deepEqual(queries, ['enterprise.example']);
+  assert.equal(reads.length, 1);
+  assert.equal(probes.length, 1);
+  assert.equal(f.verifications.length, 0);
+  assert.equal(f.sends.length, 0);
+  assert.doesNotMatch(JSON.stringify(probes), /password/);
+  await f.finish(agent, applied.reply);
+  await f.send({ text: '/mail code private-web-test-code' });
+  assert.ok(JSON.stringify(agent.queue).includes(original));
+  assert.doesNotMatch(JSON.stringify(agent.queue), /private-web-test-code/);
+  assert.deepEqual(f.store().searchMessages({ query: 'private-web-test-code' }), []);
+  await f.claim(agent);
+  await f.execute('feishu_send_email', agent, { subject: 'Web', text: 'Original request.' });
+  await f.execute('feishu_send_email', agent, { subject: 'Web', text: 'Original request.' });
+  assert.equal(f.sends.length, 1);
+  assert.equal(f.sends[0][0].host, proposal.host);
+  assert.equal(f.sends[0][3].publicOnly, true);
+});

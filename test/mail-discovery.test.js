@@ -335,3 +335,14 @@ test('invalid mailbox domains never trigger a network request', async () => {
     assert.deepEqual(await discoverMailProvider(address, { resolveSrv: fail, fetchText: fail, lookup: fail }), { status: 'not_found' });
   }
 });
+
+test('official publisher URL guard applies before DNS and every redirected request', async () => {
+  const seen = [], lookups = [];
+  await assert.rejects(fetchPublicText('https://official.example.org/help', {
+    validateUrl: url => url.hostname === 'official.example.org',
+    lookup: async host => { lookups.push(host); return publicLookup(host); },
+    request: fakeRequest([{ status: 302, headers: { location: 'https://other.example.com/help' } }], seen),
+  }));
+  assert.equal(seen.length, 1);
+  assert.deepEqual(lookups, ['official.example.org']);
+});
