@@ -276,7 +276,7 @@ window.__ModuleLoader__.load({
               h('input', { id: `${prefix}-new-bot-name`, value: newName, required: true, maxLength: 80, disabled: blocked,
                 onChange: event => setNewName(event.target.value) })),
             h(ProjectPicker, { id: `${prefix}-new-bot-path`, label: '新机器人项目目录', value: newPath, onChange: setNewPath, disabled: blocked }),
-            h('button', { type: 'submit', disabled: blocked || !newName.trim() || !newPath.trim(), className: 'feishu-primary' }, busy ? '添加中…' : '创建机器人'))),
+            h('button', { type: 'submit', disabled: blocked || !newName.trim() || !newPath.trim(), 'aria-busy': busy, className: 'feishu-primary' }, busy ? '添加中…' : '创建机器人'))),
         error && h('div', { role: 'alert', className: 'feishu-error' }, error,
           !bots.length && h('button', { type: 'button', onClick: () => setReload(reload + 1) }, '重新加载机器人列表')),
         !loading && selected && h(BotSettings, { key: selected.id, botId: selected.id, onDraftState: setDraft }));
@@ -419,7 +419,7 @@ window.__ModuleLoader__.load({
         return typeof value === 'string' && /^https:\/\/(?:open\.feishu\.cn|github\.com)\//.test(value) ? value : undefined;
       }
       function button(label, onClick, action, primary = false) {
-        return h('button', { type: 'button', disabled: Boolean(busy), onClick,
+        return h('button', { type: 'button', disabled: Boolean(busy), 'aria-busy': busy === action, onClick,
           className: primary ? 'feishu-primary' : '' }, busy === action ? '处理中…' : label);
       }
       const tunnelDirty = tunnelFields.some(key => config[key] !== savedConfig[key]);
@@ -453,22 +453,22 @@ window.__ModuleLoader__.load({
                 h('li', null, '执行配置后，按下方检查结果完成飞书后台待办，并实际发送消息验收。')),
               h('div', { className: 'feishu-actions' },
                 button('保存并一键配置', () => run('setup', configureSetup), 'setup', true),
-                h('button', { type: 'button', disabled: Boolean(busy) || dirty, onClick: () => run('setup-check', recheckSetup) }, busy === 'setup-check' ? '检查中…' : '重新检查')),
-              dirty && h('p', { className: 'feishu-muted' }, '有未保存的修改，请点击「保存并一键配置」后再复检。'),
-              setupPhase && h('p', { role: 'status', 'aria-live': 'polite' }, setupPhase),
+                h('button', { type: 'button', disabled: Boolean(busy) || dirty, 'aria-busy': busy === 'setup-check', onClick: () => run('setup-check', recheckSetup) }, busy === 'setup-check' ? '检查中…' : '重新检查')),
+              dirty && h('p', { className: 'feishu-state-banner is-attention' }, '有未保存的修改，请点击「保存并一键配置」后再复检。'),
+              setupPhase && h('p', { role: 'status', 'aria-live': 'polite', className: 'feishu-state-banner is-working' }, setupPhase),
               h('p', { className: 'feishu-muted' }, '自动步骤不会代替你开通飞书权限、发布应用或验证真实消息；不会发送测试消息、邮件或付费模型请求。'),
               setupReport && h('div', { className: 'feishu-setup-report', 'aria-live': 'polite' },
-                h('p', { role: 'status' }, `检查完成：${setupReport.checks.filter(item => item.state === 'ok').length} 项通过，${setupReport.checks.filter(item => item.state !== 'ok').length} 项需要处理或确认。实际收发仍需验收。`),
+                h('p', { role: 'status', className: `feishu-state-banner ${setupReport.checks.some(item => item.state === 'error') ? 'is-error' : setupReport.checks.some(item => item.state !== 'ok') ? 'is-attention' : 'is-success'}` }, `检查完成：${setupReport.checks.filter(item => item.state === 'ok').length} 项通过，${setupReport.checks.filter(item => item.state !== 'ok').length} 项需要处理或确认。实际收发仍需验收。`),
                 setupReport.callbackUrl && h('div', { className: 'feishu-field' },
                   h('label', { htmlFor: `${prefix}-setup-callback` }, '当前机器人的飞书回调地址'),
                   h('div', { className: 'feishu-actions' },
                     h('input', { id: `${prefix}-setup-callback`, readOnly: true, value: setupReport.callbackUrl }),
                     button('复制回调地址', () => run('setup-copy', async () => { await navigator.clipboard.writeText(setupReport.callbackUrl); setNotice({ text: '回调地址已复制，请在飞书后台保存并验证。' }); }), 'setup-copy'))),
                 h('ul', { className: 'feishu-setup-checks' }, setupReport.checks.map(item => h('li', { key: item.id, 'data-check-state': item.state },
-                  h('div', { className: 'feishu-setup-check-heading' }, h('strong', null, item.title), h('span', null, ({ ok: '已通过', action: '待处理', warning: '待确认', error: '检查失败' })[item.state] || '待确认')),
+                  h('div', { className: 'feishu-setup-check-heading' }, h('strong', null, item.title), h('span', { className: 'feishu-state-badge', 'data-state': item.state }, ({ ok: '已通过', action: '待处理', warning: '待确认', error: '检查失败' })[item.state] || '待确认')),
                   h('p', null, item.message),
                   safeSetupLink(item.action?.url) && h('a', { href: safeSetupLink(item.action.url), target: '_blank', rel: 'noopener noreferrer' }, item.action.label))))),
-              notice && h('p', { role: notice.error ? 'alert' : 'status', className: notice.error ? 'feishu-error' : 'feishu-success' }, notice.text)),
+              notice && h('p', { role: notice.error ? 'alert' : 'status', className: `feishu-state-banner ${notice.error ? 'is-error' : 'is-success'}` }, notice.text)),
             h('form', { onSubmit: event => {
               event.preventDefault();
               run('save', async () => {
@@ -602,20 +602,20 @@ window.__ModuleLoader__.load({
                 !sharedTunnel && tunnelDirty && managedProvider && h('p', { role: 'status', className: 'feishu-muted' }, '隧道相关配置尚未保存，请先保存，再启动隧道。启动按钮仅使用已保存的配置。'),
                 h('div', { className: 'feishu-actions' },
                   !sharedTunnel && managedProvider && h('button', { type: 'button', disabled: Boolean(busy) || loading || tunnelDirty || (savedMode !== 'webhook' && !savedConfig.serverTunnelRequired) || tunnel?.state === 'starting' || Boolean(tunnel?.managed && tunnel?.running),
-                    onClick: () => run('tunnel-start', async () => {
+                    'aria-busy': busy === 'tunnel-start', onClick: () => run('tunnel-start', async () => {
                       await tunnelRequest('tunnel/start', {});
                       await refreshStatus();
                       setNotice({ text: '已请求启动隧道，请查看运行状态与 Webhook 地址。' });
                     }) }, busy === 'tunnel-start' ? '启动中…' : '启动当前端口的隧道'),
                   !sharedTunnel && tunnel?.managed && h('button', { type: 'button', disabled: Boolean(busy),
-                    onClick: () => run('tunnel-stop', async () => {
+                    'aria-busy': busy === 'tunnel-stop', onClick: () => run('tunnel-stop', async () => {
                       await tunnelRequest('tunnel/stop', {});
                       await refreshStatus();
                       setNotice({ text: '已停止插件托管的隧道并暂停自动重试；点击启动或重新开启守护可恢复。' });
                     }) }, busy === 'tunnel-stop' ? '停止中…' : '停止托管隧道'),
                   button('刷新状态', () => run('status', refreshStatus), 'status'))),
               h('div', { className: 'feishu-actions' },
-                h('button', { type: 'submit', disabled: Boolean(busy), className: 'feishu-primary' }, busy === 'save' ? '保存中…' : '保存配置'))),
+                h('button', { type: 'submit', disabled: Boolean(busy), 'aria-busy': busy === 'save', className: 'feishu-primary' }, busy === 'save' ? '保存中…' : '保存配置'))),
             h('p', { className: 'feishu-muted' }, '每日上下文切换由插件管理，其他通用定时任务尚未接入执行器。'),
             h('a', { href: 'https://open.feishu.cn/app', target: '_blank', rel: 'noopener noreferrer' }, '打开飞书开放平台')));
     }
@@ -628,15 +628,33 @@ window.__ModuleLoader__.load({
       .feishu-settings section{border:1px solid var(--dsw-alias-border-l2,#ddd);border-radius:12px;padding:18px;margin:20px 0}
       .feishu-setup{background:var(--dsw-alias-bg-layer-2,#f6f8fc)}.feishu-setup-steps{padding-left:22px}.feishu-setup-steps li{margin:8px 0}
       .feishu-setup-checks{list-style:none;padding:0 4px 0 0;margin:12px 0;max-height:420px;overflow:auto;overscroll-behavior:contain}.feishu-setup-checks>li{padding:12px 0;border-top:1px solid var(--dsw-alias-border-l2,#ddd)}.feishu-setup-checks p{margin:5px 0;overflow-wrap:anywhere}
-      .feishu-setup-check-heading{display:flex;gap:12px;justify-content:space-between}.feishu-setup-check-heading span{flex-shrink:0;color:var(--dsw-alias-label-secondary,#686a70)}.feishu-setup-checks [data-check-state=ok] .feishu-setup-check-heading span{color:#258047}.feishu-setup-checks [data-check-state=error] .feishu-setup-check-heading span{color:var(--dsw-alias-label-error,#ba3030)}
+      .feishu-setup-check-heading{display:flex;gap:12px;justify-content:space-between}.feishu-setup-check-heading span{flex-shrink:0;color:var(--dsw-alias-label-secondary,#686a70)}
       .feishu-field{display:flex;flex-direction:column;gap:6px;margin:14px 0}.feishu-settings label{font-weight:500}
       .feishu-settings input,.feishu-settings select,.feishu-settings textarea{width:100%;min-width:0;border:1px solid var(--dsw-alias-border-l4,#ccc);border-radius:8px;background:var(--dsw-alias-bg-layer-3,#fff);color:inherit;padding:9px 11px;font:inherit}
       .feishu-settings textarea{resize:vertical}
       .feishu-settings .feishu-switch{width:46px;height:26px;padding:3px;border-radius:20px;display:inline-flex;align-items:center;flex-shrink:0;background:var(--dsw-alias-bg-layer-3,#ddd)}
       .feishu-switch span{width:18px;height:18px;border-radius:50%;background:var(--dsw-alias-label-secondary,#686a70);transition:transform .15s}
-      .feishu-settings .feishu-switch[aria-checked="true"]{background:var(--dsw-alias-brand-primary,#4d6bfe)}.feishu-switch[aria-checked="true"] span{transform:translateX(20px);background:white}
+      .feishu-settings .feishu-switch[aria-checked="true"]{background:var(--dsw-alias-brand-primary,#4d6bfe)}.feishu-switch[aria-checked="true"] span{transform:translateX(20px);background:var(--dsw-alias-label-primary-inverted,#fff)}
       .feishu-settings button{border:1px solid var(--dsw-alias-border-l4,#ccc);border-radius:8px;padding:8px 14px;background:var(--dsw-alias-bg-layer-3,#fff);color:inherit;font:inherit;cursor:pointer;white-space:nowrap}
-      .feishu-settings button:disabled{opacity:.55;cursor:default}.feishu-settings .feishu-primary{background:var(--dsw-alias-brand-primary,#4d6bfe);border-color:transparent;color:white}
+      .feishu-settings button:disabled{opacity:.55;cursor:default}.feishu-settings .feishu-primary{background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary,#111827));border-color:transparent;color:var(--dsw-alias-label-primary-inverted,#fff);font-weight:600;transition:box-shadow .16s ease,transform .16s ease}
+      .feishu-settings button{transition:background-color .16s ease,box-shadow .16s ease,transform .16s ease}
+      .feishu-settings .feishu-primary:not(:disabled):hover{background:var(--dsw-alias-button-primary-hover,#374151);box-shadow:0 3px 10px #0002;transform:translateY(-1px)}
+      .feishu-settings .feishu-primary:disabled{opacity:1;background:var(--dsw-alias-button-primary-dimmed,#e5e7eb);color:var(--dsw-alias-label-primary,#202124);cursor:not-allowed}
+      .feishu-settings button[aria-busy=true]{display:inline-flex;align-items:center;justify-content:center;gap:8px;opacity:1;cursor:progress}
+      .feishu-settings button[aria-busy=true]::before,.feishu-state-banner.is-working::before{content:'';display:inline-block;flex-shrink:0;width:15px;height:15px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:feishu-status-spin .8s linear infinite}
+      .feishu-state-banner{--feishu-state-color:var(--dsw-alias-brand-primary-new-colorprimary-new-color,#4176e6);display:flex;align-items:center;gap:10px;padding:12px 14px;border:1px solid color-mix(in srgb,var(--feishu-state-color) 40%,transparent);border-left:4px solid var(--feishu-state-color);border-radius:8px;background:color-mix(in srgb,var(--feishu-state-color) 12%,var(--dsw-alias-bg-layer-2,#fff));color:var(--dsw-alias-label-primary,#202124);font-weight:500;overflow-wrap:anywhere;animation:feishu-status-enter .24s ease-out}
+      .feishu-state-banner::before{content:'i';display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:20px;height:20px;border:1.5px solid currentColor;border-radius:50%;font-weight:700}
+      .feishu-state-banner.is-error{--feishu-state-color:var(--dsw-alias-state-error-primary,#d54941);animation:feishu-status-enter .24s ease-out,feishu-status-attention 1.1s ease-out 2}
+      .feishu-state-banner.is-error::before,.feishu-state-banner.is-attention::before{content:'!'}
+      .feishu-state-banner.is-attention{--feishu-state-color:var(--dsw-alias-state-warn-label,#b36b00)}
+      .feishu-state-banner.is-success{--feishu-state-color:var(--dsw-alias-state-success-primary,#258047)}.feishu-state-banner.is-success::before{content:'✓'}
+      .feishu-setup-checks .feishu-state-badge{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--dsw-alias-border-l4,#ccc);border-radius:999px;padding:2px 8px;font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,#202124)}
+      .feishu-state-badge::before{content:'!';font-weight:700}.feishu-state-badge[data-state=ok]::before{content:'✓'}
+      .feishu-setup-checks .feishu-state-badge[data-state=error]{border-color:var(--dsw-alias-state-error-primary,#d54941);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#d54941) 18%,transparent)}
+      .feishu-setup-checks .feishu-state-badge[data-state=action],.feishu-setup-checks .feishu-state-badge[data-state=warning]{border-color:var(--dsw-alias-state-warn-label,#b36b00);background:color-mix(in srgb,var(--dsw-alias-state-warn-label,#b36b00) 12%,transparent)}
+      .feishu-setup-checks .feishu-state-badge[data-state=ok]{border-color:var(--dsw-alias-state-success-primary,#258047);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#258047) 12%,transparent)}
+      @keyframes feishu-status-spin{to{transform:rotate(360deg)}}@keyframes feishu-status-enter{from{opacity:.5;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}@keyframes feishu-status-attention{0%,100%{box-shadow:0 0 0 0 transparent}45%{box-shadow:0 0 0 4px color-mix(in srgb,var(--feishu-state-color) 20%,transparent)}}
+      @media(prefers-reduced-motion:reduce){.feishu-settings button,.feishu-switch span{transition:none}.feishu-settings .feishu-primary:not(:disabled):hover{transform:none}.feishu-state-banner,.feishu-state-banner.is-error,.feishu-state-banner.is-working::before,.feishu-settings button[aria-busy=true]::before{animation:none}}
       .feishu-settings :is(input,select,textarea,button,a):focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4d6bfe);outline-offset:2px}
       .feishu-project-control{display:flex;align-items:stretch;width:100%;border:1px solid var(--dsw-alias-border-l4,#ccc);border-radius:8px;background:var(--dsw-alias-bg-layer-3,#fff)}
       .feishu-settings .feishu-project-trigger{display:flex;align-items:center;justify-content:space-between;gap:12px;flex:1;min-width:0;border:0;border-radius:8px 0 0 8px;text-align:left;white-space:normal}
@@ -654,7 +672,7 @@ window.__ModuleLoader__.load({
       .feishu-settings .feishu-project-option:not(:disabled):hover{background:var(--dsw-alias-bg-layer-2,#f2f4f8)}
       .feishu-sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
       .feishu-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.feishu-actions input{flex:1;min-width:160px}
-      .feishu-muted,.feishu-field small{color:var(--dsw-alias-label-secondary,#686a70)}.feishu-settings .feishu-error{color:var(--dsw-alias-label-error,#ba3030);overflow-wrap:anywhere}.feishu-success{color:#258047}
+      .feishu-muted,.feishu-field small{color:var(--dsw-alias-label-secondary,#686a70)}.feishu-settings .feishu-error{color:var(--dsw-alias-state-error-primary,#ba3030);overflow-wrap:anywhere}.feishu-success{color:#258047}
       .feishu-settings a{color:var(--dsw-alias-brand-primary,#4d6bfe)}
       @media(max-width:480px){.feishu-settings section{padding:12px}.feishu-settings{padding:4px 0 18px}}
     `;
