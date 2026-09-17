@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createMailUserFlow } from '../lib/mail-user-flow.js';
+import { createMailUserFlow, parseSmtpServerCommand } from '../lib/mail-user-flow.js';
 
 const alice = { source: 'bot-a', tenantId: 'tenant-a', openId: 'ou_alice' };
 const bob = { ...alice, openId: 'ou_bob' };
@@ -17,6 +17,7 @@ function fixture(options = {}) {
   async function ready(identity = alice, secret = 'smtp-only-secret') {
     await handle('/mail', {}, identity);
     await handle('sender@example.com', {}, identity);
+    await handle('/mail server smtp.example.com 465 tls', {}, identity);
     await handle('/mail code [removed]', { secret }, identity);
     await handle('recipient@example.com', {}, identity);
   }
@@ -27,7 +28,7 @@ test('ordinary conversation passes through until email is requested; mandatory g
   const app = fixture();
   assert.deepEqual(await app.handle('你好'), { handled: false });
   assert.equal(app.values.size, 0);
-  assert.match((await app.handle('帮我发邮件', { requireSetup: true })).reply, /飞书邮箱/);
+  assert.match((await app.handle('帮我发邮件', { requireSetup: true })).reply, /发件邮箱/);
   assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_email');
   assert.equal((await app.handle('先回答别的问题')).handled, true);
   assert.equal((await app.handle('/mail cancel')).handled, true);
@@ -39,7 +40,7 @@ test('verified account and recipient survive restart in credentials, with no pub
   await app.ready();
   assert.equal(app.values.size, 1);
   assert.match([...app.values.keys()][0], /^FEISHU_USER_MAIL_[A-F0-9]{64}$/);
-  assert.deepEqual(app.verified[0], [{ host: 'smtp.feishu.cn', port: 465, mode: 'tls', user: 'sender@example.com', from: 'sender@example.com' }, 'smtp-only-secret', { signal: undefined }]);
+  assert.deepEqual(app.verified[0], [{ host: 'smtp.example.com', port: 465, mode: 'tls', user: 'sender@example.com', from: 'sender@example.com' }, 'smtp-only-secret', { signal: undefined }]);
   const restarted = createMailUserFlow(app.ctx);
   assert.deepEqual(await restarted.getStatus(alice), { stage: 'ready', bound: true, email: 'sender@example.com', recipient: 'recipient@example.com' });
   assert.deepEqual(await restarted.getIngressState(alice), { stage: 'ready', chatId: 'private-a' });
@@ -79,6 +80,7 @@ test('a different private chat cannot consume a pending flow', async () => {
   const app = fixture();
   await app.handle('/mail');
   await app.handle('sender@example.com');
+  await app.handle('/mail server smtp.example.com 465 tls');
   for (const text of ['/mail', '/mail code [removed]', 'other@example.com']) {
     assert.match((await app.handle(text, { chatId: 'private-other', secret: 'wrong-chat-secret' })).reply, /最初/);
   }
@@ -90,6 +92,7 @@ test('only explicit ingress secret is verified; arbitrary text never becomes a p
   const app = fixture();
   await app.handle('/mail setup');
   await app.handle('sender@example.com');
+  await app.handle('/mail server smtp.example.com 465 tls');
   assert.match((await app.handle('plain-secret')).reply, /\/mail code/);
   assert.match((await app.handle('/mail code raw-unintercepted-secret')).reply, /\/mail code/);
   assert.equal(app.verified.length, 0);
@@ -105,6 +108,7 @@ test('SMTP failures never persist or echo secrets and allow retry', async () => 
   const app = fixture({ verify: async (_, secret) => { if (fail) throw new Error(`server leaked ${secret}`); } });
   await app.handle('/mail');
   await app.handle('sender@example.com');
+  await app.handle('/mail server smtp.example.com 465 tls');
   const reply = await app.handle('/mail code [removed]', { secret: 'reject-secret' });
   assert.match(reply.reply, /验证失败/);
   assert.doesNotMatch(JSON.stringify(reply), /reject-secret|server leaked/);
@@ -115,6 +119,145 @@ test('SMTP failures never persist or echo secrets and allow retry', async () => 
   assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_recipient');
 });
 
+test('explicit SMTP configuration supports arbitrary hosts and ports for TLS and STARTTLS', async () => {
+  for (const [host, port, mode] of [
+    ['mail.company.example', 465, 'tls'],
+    ['smtp.provider.example', 587, 'starttls'],
+    ['PRIVATE.SMTP.EXAMPLE', 2465, 'tls'],
+  ]) {
+    const app = fixture();
+    assert.match((await app.handle('/mail')).reply, /邮箱提供商/);
+    assert.match((await app.handle('sender@example.com')).reply, /\/mail server/);
+    assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_server');
+    assert.match((await app.handle('some arbitrary text')).reply, /\/mail server/);
+    const result = await app.handle(`/mail server ${host} ${port} ${mode}`);
+    assert.ok(result.reply.includes(`${host.toLowerCase()}:${port}`));
+    assert.match(result.reply, /不要发送邮箱登录密码或飞书应用 App Secret/);
+    assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_code');
+    assert.ok((await app.handle('/mail status')).reply.includes(`${host.toLowerCase()}:${port}`));
+    await app.handle('/mail code [removed]', { secret: 'test-only-authorization' });
+    assert.deepEqual(app.verified[0][0], { host: host.toLowerCase(), port, mode, user: 'sender@example.com', from: 'sender@example.com' });
+    await app.handle('recipient@example.com');
+    const restarted = createMailUserFlow(app.ctx);
+    const account = await restarted.getAccount(alice);
+    assert.equal(account.config.host, host.toLowerCase());
+    assert.equal(account.config.port, port);
+    assert.equal(account.config.mode, mode);
+    assert.ok((await app.handle('/mail status')).reply.includes(`${host.toLowerCase()}:${port}`));
+  }
+});
+
+test('legacy pending states require explicit SMTP configuration without dropping the email', async () => {
+  const app = fixture();
+  await app.handle('/mail');
+  const ref = [...app.values.keys()][0];
+  app.values.set(ref, { source: 'store', value: JSON.stringify({ version: 1, stage: 'awaiting_code', chatId: 'private-a', email: '123456@qq.com', updatedAt: '2026-01-01T00:00:00.000Z' }) });
+  const calls = [];
+  const restarted = createMailUserFlow(app.ctx, { verify: async (...args) => { calls.push(args); } });
+  const handle = (text, extra = {}) => restarted.handle(alice, { text, chatId: 'private-a', chatType: 'p2p', ...extra });
+  assert.equal((await restarted.getStatus(alice)).stage, 'awaiting_code');
+  assert.deepEqual(await restarted.getIngressState(alice), { stage: 'awaiting_code', chatId: 'private-a' });
+  assert.match((await handle('pure-legacy-authorization', { secret: 'pure-legacy-authorization' })).reply, /\/mail server/);
+  assert.match((await handle('/mail code [removed]', { secret: 'do-not-use-yet' })).reply, /\/mail server/);
+  assert.equal(calls.length, 0);
+  assert.doesNotMatch(JSON.stringify([...app.values]), /do-not-use-yet/);
+  assert.doesNotMatch(JSON.stringify([...app.values]), /pure-legacy-authorization/);
+  await handle('/mail server smtp.qq.com 465 tls');
+  assert.equal((await restarted.getStatus(alice)).email, '123456@qq.com');
+  const result = await handle('/mail code [removed]', { secret: 'new-authorization' });
+  assert.match(result.reply, /邮箱验证成功/);
+  assert.equal(calls[0][0].host, 'smtp.qq.com');
+  assert.equal((await restarted.getStatus(alice)).stage, 'awaiting_recipient');
+});
+
+test('legacy verified accounts retain their prior endpoint until explicitly reconfigured', async () => {
+  const app = fixture();
+  await app.handle('/mail');
+  const ref = [...app.values.keys()][0];
+  app.values.set(ref, { source: 'store', value: JSON.stringify({ version: 1, stage: 'ready', chatId: 'private-a', email: 'sender@example.com', password: 'old-authorization', recipient: 'old-recipient@example.com' }) });
+  assert.equal((await app.flow.getAccount(alice)).config.host, 'smtp.feishu.cn');
+  assert.match((await app.handle('/mail status')).reply, /兼容旧版已验证配置/);
+  assert.match((await app.handle('/mail status')).reply, /\/mail server/);
+  await app.handle('/mail server new.smtp.example 587 starttls');
+  assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_code');
+  assert.equal(await app.flow.getAccount(alice), null);
+  assert.doesNotMatch(JSON.stringify([...app.values]), /old-authorization|old-recipient/);
+  await app.handle('/mail code [removed]', { secret: 'new-authorization' });
+  await app.handle('new-recipient@example.com');
+  assert.equal((await app.flow.getAccount(alice)).config.host, 'new.smtp.example');
+});
+
+test('SMTP configuration parsing rejects unsafe forms and invalid edits leave the old account intact', async () => {
+  const app = fixture();
+  await app.ready();
+  const before = JSON.stringify([...app.values]);
+  for (const command of [
+    '/mail server', '/mail server smtp.example.com 465', '/mail server smtp.example.com 465 tls extra',
+    '/mail server smtp://example.com 465 tls', '/mail server https://secret@example.com 465 tls',
+    '/mail server user:secret@example.com 465 tls', '/mail server smtp.example.com/path 465 tls',
+    '/mail server smtp.example.com 0 tls', '/mail server smtp.example.com 65536 tls',
+    '/mail server smtp.example.com 4.65 tls', '/mail server smtp.example.com 465 plain',
+    '/mail server -example.com 465 tls', '/mail server smtp.example.com 465 tls\n',
+  ]) {
+    assert.equal(parseSmtpServerCommand(command), undefined);
+    const result = await app.handle(command);
+    assert.match(result.reply, /格式无效/);
+    assert.doesNotMatch(result.reply, /user:secret|https:\/\/secret/);
+    assert.equal(JSON.stringify([...app.values]), before);
+  }
+  assert.equal(parseSmtpServerCommand('arbitrary text'), undefined);
+  assert.equal(parseSmtpServerCommand(null), undefined);
+  assert.deepEqual(parseSmtpServerCommand(' /MAIL SERVER SMTP.EXAMPLE.COM 587 STARTTLS '), { host: 'smtp.example.com', port: 587, mode: 'starttls' });
+});
+
+test('SMTP settings and replacements are isolated by identity and original private chat', async () => {
+  const app = fixture();
+  await app.ready();
+  await app.ready(bob, 'bob-secret');
+  const before = (await app.flow.getAccount(alice)).config;
+  assert.match((await app.handle('/mail server other.example.com 587 starttls', { chatId: 'private-other' })).reply, /最初/);
+  assert.match((await app.handle('/mail server other.example.com 587 starttls', { chatType: 'group' })).reply, /私聊/);
+  assert.deepEqual((await app.flow.getAccount(alice)).config, before);
+  await app.handle('/mail server bob.example.com 587 starttls', {}, bob);
+  assert.deepEqual((await app.flow.getAccount(alice)).config, before);
+  assert.equal(await app.flow.getAccount(bob), null);
+  await app.handle('/mail code [removed]', { secret: 'new-bob-secret' }, bob);
+  await app.handle('bob-recipient@example.com', {}, bob);
+  assert.equal((await app.flow.getAccount(bob)).config.host, 'bob.example.com');
+  assert.equal((await app.flow.getAccount(alice)).config.host, 'smtp.example.com');
+});
+
+test('SMTP failures explain only allowlisted categories without leaking provider details or secrets', async () => {
+  const replies = new Set();
+  for (const [code, expected] of [
+    ['AUTH_FAILED', /SMTP 身份验证失败/],
+    ['TLS_FAILED', /TLS 安全连接校验/],
+    ['CONNECTION_FAILED', /无法连接 SMTP 服务器/],
+    ['TIMEOUT', /验证 SMTP 服务器超时/],
+    ['SMTP_FAILED', /SMTP 服务未能完成邮箱验证/],
+    ['PROVIDER_LEAK_secret', /邮箱验证失败/],
+    [undefined, /邮箱验证失败/],
+  ]) {
+    const app = fixture({ verify: async () => {
+      const error = new Error('provider-response-secret', { cause: new Error('provider-cause-secret') });
+      error.code = code;
+      throw error;
+    } });
+    await app.handle('/mail');
+    await app.handle('123456@qq.com');
+    await app.handle('/mail server smtp.qq.com 465 tls');
+    const result = await app.handle('/mail code [removed]', { secret: 'reject-authorization-secret' });
+    assert.match(result.reply, expected);
+    assert.match(result.reply, /未保存本次授权码/);
+    assert.match(result.reply, /smtp\.qq\.com:465/);
+    assert.doesNotMatch(JSON.stringify(result), /provider-response-secret|provider-cause-secret|PROVIDER_LEAK_secret|reject-authorization-secret/);
+    assert.doesNotMatch(JSON.stringify([...app.values]), /reject-authorization-secret/);
+    assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_code');
+    if (code && code !== 'PROVIDER_LEAK_secret') replies.add(result.reply);
+  }
+  assert.equal(replies.size, 5, 'operational failures must remain distinguishable');
+});
+
 test('only one bare address is accepted for sender and recipient', async () => {
   const app = fixture();
   await app.handle('/mail');
@@ -123,6 +266,7 @@ test('only one bare address is accepted for sender and recipient', async () => {
     assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_email');
   }
   await app.handle('sender@example.com');
+  await app.handle('/mail server smtp.example.com 465 tls');
   await app.handle('/mail code [removed]', { secret: 'valid-secret' });
   await app.handle('a@example.com,b@example.com');
   assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_recipient');
@@ -137,6 +281,7 @@ test('cancel clears incomplete secrets, reset clears complete binding, forget is
   await app.ready(bob, 'bob-secret');
   await app.handle('/mail');
   await app.handle('sender@example.com');
+  await app.handle('/mail server smtp.example.com 465 tls');
   await app.handle('/mail code [removed]', { secret: 'alice-secret' });
   await app.handle('/mail cancel');
   assert.equal(await app.flow.getAccount(alice), null);
@@ -172,11 +317,12 @@ test('per-user serialization keeps cancel behind verification and releases other
   const app = fixture({ verify: async () => { started(); await new Promise(resolve => { release = resolve; }); } });
   await app.handle('/mail');
   await app.handle('sender@example.com');
+  await app.handle('/mail server smtp.example.com 465 tls');
   const binding = app.handle('/mail code [removed]', { secret: 'in-flight-secret' });
   await verifying;
   assert.deepEqual(await app.flow.getIngressState(alice), { stage: 'awaiting_code', chatId: 'private-a' });
   const cancelled = app.handle('/mail cancel');
-  assert.match((await app.handle('/mail', {}, bob)).reply, /飞书邮箱/);
+  assert.match((await app.handle('/mail', {}, bob)).reply, /发件邮箱/);
   release();
   await binding;
   await cancelled;
@@ -203,6 +349,7 @@ test('aborting verification rejects the operation and never persists the passwor
   const app = fixture({ verify: async (_, secret, { signal }) => { passedSignal = signal; controller.abort(); } });
   await app.handle('/mail');
   await app.handle('sender@example.com');
+  await app.handle('/mail server smtp.example.com 465 tls');
   await assert.rejects(app.handle('/mail code', { secret: 'must-not-save', signal: controller.signal }), { name: 'AbortError' });
   assert.equal(passedSignal, controller.signal);
   assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_code');

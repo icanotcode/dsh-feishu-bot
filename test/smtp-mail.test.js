@@ -2,8 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import nodemailer from 'nodemailer';
 import { createServer } from 'node:net';
+import { createServer as createTlsServer } from 'node:tls';
 import { once } from 'node:events';
 import { sendSmtpMail, verifySmtp, validateSmtpConfig, validateMailInput, SmtpMailError, SMTP_LIMITS } from '../lib/smtp-mail.js';
+import { smtpTestKey, smtpTestCertificate } from '../test-support/smtp-tls-fixture.mjs';
 
 const config = { host: 'smtp.example.com', port: 465, mode: 'tls', user: 'sender@example.com', from: 'sender@example.com' };
 const input = { to: ['recipient@example.com'], subject: '会议记录', text: '你好\n这是会议记录。' };
@@ -29,6 +31,7 @@ test('SMTP sends one TLS-authenticated message with a fixed envelope and memory 
   assert.deepEqual(await sendSmtpMail(config, password, { ...input, attachments: [{ filename: '报告.txt', content, contentType: 'text/plain' }] }, state), { status: 'accepted', accepted: input.to, rejected: [] });
   assert.equal(state.sends.length, 1); assert.equal(state.closes, 1);
   assert.deepEqual(state.options.auth, { user: config.user, pass: password });
+  assert.equal(state.options.forceAuth, true);
   assert.equal(state.options.secure, true); assert.equal(state.options.tls.rejectUnauthorized, true);
   assert.equal(state.options.tls.minVersion, 'TLSv1.2'); assert.equal(state.options.ignoreTLS, false);
   assert.equal(state.options.opportunisticTLS, false); assert.equal(state.options.pool, false);
@@ -92,7 +95,7 @@ test('recipient, text, attachment count and estimated MIME bytes are bounded bef
 });
 
 test('authentication, TLS and provider failures contain no raw server text, credentials or causes', async () => {
-  for (const [providerCode, expected, uncertain] of [['EAUTH', 'AUTH_FAILED', false], ['ETLS', 'TLS_FAILED', false], ['ECONNECTION', 'CONNECTION_FAILED', false], ['EENVELOPE', 'RECIPIENT_REJECTED', false], ['ESOCKET', 'SMTP_FAILED', true]]) {
+  for (const [providerCode, expected, uncertain] of [['EAUTH', 'AUTH_FAILED', false], ['ETLS', 'TLS_FAILED', false], ['ECONNECTION', 'CONNECTION_FAILED', true], ['EENVELOPE', 'RECIPIENT_REJECTED', false], ['ESOCKET', 'CONNECTION_FAILED', true], ['ECONNRESET', 'CONNECTION_FAILED', true], ['EPIPE', 'CONNECTION_FAILED', true], ['ETIMEDOUT', 'TIMEOUT', true]]) {
     const state = mockTransport(Object.assign(new Error(`private response ${password}`), { code: providerCode, response: password, cause: new Error(password) }));
     await assert.rejects(sendSmtpMail(config, password, input, state), error => {
       assert.equal(error.code, expected); assert.equal(error.uncertain, uncertain);
@@ -100,6 +103,13 @@ test('authentication, TLS and provider failures contain no raw server text, cred
       assert.ok(!JSON.stringify(error).includes(password)); assert.ok(!String(error).includes(password)); return true;
     });
     assert.equal(state.sends.length, 1); assert.equal(state.closes, 1);
+  }
+});
+
+test('verification network errors are sanitized and never claim an uncertain email submission', async () => {
+  for (const [providerCode, expected] of [['ESOCKET', 'CONNECTION_FAILED'], ['ECONNRESET', 'CONNECTION_FAILED'], ['EPIPE', 'CONNECTION_FAILED'], ['ETIMEDOUT', 'TIMEOUT']]) {
+    const state = mockTransport(Object.assign(new Error(password), { code: providerCode }));
+    await assert.rejects(verifySmtp(config, password, state), error => error.code === expected && error.uncertain === false && !String(error).includes(password));
   }
 });
 
@@ -204,4 +214,85 @@ test('verification timeout destroys an idle socket rather than leaving authentic
   const local = await smtpServer(t, socket => { peerClosed = once(socket, 'close'); });
   await assert.rejects(verifySmtp({ ...local, mode: 'starttls' }, password, { timeoutMs: 50 }), error => error.code === 'TIMEOUT' && error.uncertain === false);
   await peerClosed;
+});
+
+async function tlsSmtpServer(t, { advertiseAuth = true, acceptAuth = true } = {}) {
+  const peers = new Set();
+  const transcript = [];
+  let authenticated = false;
+  const server = createTlsServer({ key: smtpTestKey, cert: smtpTestCertificate, minVersion: 'TLSv1.2' }, socket => {
+    let pending = '';
+    socket.write('220 loopback SMTP ready\r\n');
+    socket.on('data', chunk => {
+      pending += chunk.toString('utf8');
+      let boundary;
+      while ((boundary = pending.indexOf('\r\n')) !== -1) {
+        const line = pending.slice(0, boundary);
+        pending = pending.slice(boundary + 2);
+        transcript.push(line);
+        if (line.startsWith('EHLO ')) {
+          socket.write(advertiseAuth ? '250-loopback\r\n250 AUTH PLAIN\r\n' : '250 loopback\r\n');
+        } else if (line.startsWith('AUTH PLAIN ')) {
+          const credentials = Buffer.from(line.slice('AUTH PLAIN '.length), 'base64').toString();
+          authenticated = acceptAuth && credentials === `\0${config.user}\0${password}`;
+          socket.write(authenticated ? '235 2.7.0 Authentication successful\r\n' : `535 5.7.8 Rejected private diagnostic ${password}\r\n`);
+        } else if (line === 'QUIT') {
+          socket.end('221 Bye\r\n');
+        } else {
+          socket.write('500 Unexpected command\r\n');
+        }
+      }
+    });
+  });
+  server.on('connection', socket => {
+    peers.add(socket); socket.on('error', () => {});
+    socket.once('close', () => peers.delete(socket));
+  });
+  server.on('tlsClientError', () => {});
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  t.after(async () => { for (const socket of peers) socket.destroy(); await new Promise(resolve => server.close(resolve)); });
+  return {
+    config: { ...config, host: '127.0.0.1', port: server.address().port },
+    transcript,
+    authenticated: () => authenticated,
+    transportFactory: options => {
+      assert.equal(options.tls.rejectUnauthorized, true);
+      return nodemailer.createTransport({ ...options, tls: { ...options.tls, ca: smtpTestCertificate } });
+    },
+  };
+}
+
+test('real implicit TLS verification validates the certificate, performs EHLO and authenticates without sending', async t => {
+  const local = await tlsSmtpServer(t);
+  assert.deepEqual(await verifySmtp(local.config, password, { transportFactory: local.transportFactory, timeoutMs: 3000 }), { verified: true });
+  assert.equal(local.authenticated(), true);
+  assert.match(local.transcript[0], /^EHLO /);
+  assert.ok(local.transcript.some(line => line.startsWith('AUTH PLAIN ')));
+  assert.ok(local.transcript.every(line => !/^(?:MAIL FROM|RCPT TO|DATA)/.test(line)));
+});
+
+test('real SMTP 535 authentication rejection returns safe AUTH_FAILED with no server diagnostics', async t => {
+  const local = await tlsSmtpServer(t, { acceptAuth: false });
+  await assert.rejects(verifySmtp(local.config, password, { transportFactory: local.transportFactory, timeoutMs: 3000 }), error => {
+    assert.equal(error.code, 'AUTH_FAILED'); assert.equal(error.uncertain, false);
+    assert.ok(!String(error).includes(password)); assert.ok(!JSON.stringify(error).includes(password));
+    assert.equal(error.response, undefined); assert.equal(error.cause, undefined);
+    return true;
+  });
+  assert.equal(local.authenticated(), false);
+  assert.ok(local.transcript.some(line => line.startsWith('AUTH PLAIN ')));
+});
+
+test('a TLS SMTP server without AUTH advertisement cannot falsely verify the mailbox authorization code', async t => {
+  const local = await tlsSmtpServer(t, { advertiseAuth: false, acceptAuth: false });
+  await assert.rejects(verifySmtp(local.config, password, { transportFactory: local.transportFactory, timeoutMs: 3000 }), code('AUTH_FAILED'));
+  assert.equal(local.authenticated(), false);
+  assert.ok(local.transcript.some(line => line.startsWith('AUTH PLAIN ')));
+});
+
+test('real TLS verification rejects an untrusted SMTP certificate before authentication', async t => {
+  const local = await tlsSmtpServer(t);
+  await assert.rejects(verifySmtp(local.config, password, { timeoutMs: 3000 }), code('TLS_FAILED'));
+  assert.equal(local.authenticated(), false);
+  assert.deepEqual(local.transcript, []);
 });

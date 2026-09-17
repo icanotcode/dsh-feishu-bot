@@ -16,7 +16,7 @@ async function fixture(t, options = {}) {
     send: async (...args) => { sends.push(args); return options.send ? options.send(...args) : { status: 'accepted', accepted: args[2].to, rejected: [] }; } } });
   const execute = (name, agent, args = {}, callId = name) => app.tools.get(name).execute(args, { agent, callId, signal: new AbortController().signal });
   async function setup(user = 'alice', chatId = 'chat-a') {
-    for (const text of ['/mail', `${user}@example.com`, `/mail code test-only-${user}-auth`, `recipient-${user}@example.com`]) await app.send({ senderId: user, chatId, text });
+    for (const text of ['/mail', `${user}@example.com`, '/mail server smtp.example.com 465 tls', `/mail code test-only-${user}-auth`, `recipient-${user}@example.com`]) await app.send({ senderId: user, chatId, text });
   }
   async function active(user = 'alice', chatId = 'chat-a', text = '请发送邮件：主题测试，正文你好', messageId) {
     await app.send({ senderId: user, chatId, text, messageId });
@@ -39,9 +39,13 @@ test('ordinary messages load the skill without requiring a mailbox; natural emai
   assert.match(setup.data.reply, /本人.*邮箱/);
   await f.finish(agent);
   await f.send({ text: 'alice@example.com' });
+  await f.send({ text: '/mail server smtp.example.com 587 starttls' });
   await f.send({ text: 'test-only-plain-auth' });
   await f.send({ text: 'target@example.com' });
   assert.equal(f.verifications[0][1], 'test-only-plain-auth');
+  assert.equal(f.verifications[0][0].host, 'smtp.example.com');
+  assert.equal(f.verifications[0][0].port, 587);
+  assert.equal(f.verifications[0][0].mode, 'starttls');
   assert.deepEqual(f.store().searchMessages({ query: 'test-only-plain-auth' }), []);
   assert.equal(JSON.stringify(f.replies).includes('test-only-plain-auth'), false);
   assert.equal(f.sends.length, 0, 'verification must never send a test email');

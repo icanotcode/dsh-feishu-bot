@@ -64,6 +64,15 @@ test('group credentials are discarded; invalid authentication never reaches sens
   assert.equal(f.deliveries.length, 1);
 });
 
+test('pending authorization allows valid SMTP settings but still redacts malformed commands containing secrets', async () => {
+  const f = fixture({ getIngressState: async () => ({ stage: 'awaiting_code', chatId: 'chat-a' }) });
+  await f.receive(payload('/mail server smtp.example.com 587 starttls', { id: 'server-valid' }), { authenticated: true });
+  assert.equal(f.deliveries[0].event.payload.parsed.userText, '/mail server smtp.example.com 587 starttls');
+  await f.receive(payload('/mail server smtp.example.com 587 starttls accidental-secret', { id: 'server-invalid' }), { authenticated: true });
+  assert.doesNotMatch(JSON.stringify(f.deliveries), /accidental-secret/);
+  assert.equal(f.deliveries[1].event.payload.parsed.userText, '/mail code');
+});
+
 test('concurrent HTTP/SDK retries are admitted once and failure is retryable without retaining a secret', async () => {
   const f = fixture();
   let release; const paused = new Promise(resolve => { release = resolve; });
