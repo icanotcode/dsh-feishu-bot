@@ -281,3 +281,95 @@ test('cached databases reject newly linked journals and substituted directory an
   assert.throws(() => user.getProfile(), /symbolic links/);
   assert.throws(() => user.confirmProfile('Alex'), /symbolic links/);
 });
+
+test('maintenance discovers persisted users after restart and filters trusted source identities', async t => {
+  const { root, manager, user } = await fixture(t);
+  const key = userKey(identity), activeId = `feishu-user-${key.slice(0, 16)}-active`, closedId = `feishu-user-${key.slice(0, 16)}-closed`;
+  session(user, activeId); session(user, closedId); session(user, 'feishu-received-audit');
+  user.setCurrentSession('private', activeId); user.closeSession(closedId, { reason: 'daily-reset' });
+  user.appendMessage({ sessionId: closedId, role: 'user', text: 'message body must not be loaded by maintenance' });
+  const otherIdentity = { ...identity, source: 'other-bot' };
+  session(manager.forUser(otherIdentity), 'feishu-user-other-session');
+  manager.close();
+  const reopened = await createHistoryStore({ root }); t.after(() => reopened.close());
+  const users = reopened.listStoredUsers({ source: identity.source });
+  assert.equal(users.length, 1); assert.equal(users[0].key, key); assert.deepEqual(users[0].identity, identity);
+  assert.equal(users[0].store, reopened.forUser(identity));
+  const sessions = users[0].store.listManagedSessions();
+  assert.equal(sessions.length, 2); assert.ok(sessions.some(row => row.sessionId === closedId && row.closedAt));
+  assert.ok(sessions.some(row => row.sessionId === activeId && !row.closedAt));
+  assert.ok(sessions.every(row => !('text' in row))); assert.ok(!JSON.stringify(sessions).includes('message body'));
+  assert.equal(reopened.listStoredUsers().length, 2);
+  assert.deepEqual(reopened.listStoredUsers({ source: 'missing' }), []);
+  reopened.close();
+});
+
+test('legacy databases remain discoverable without identity and cached forUser backfills trusted identity', async t => {
+  const { root, manager, user } = await fixture(t); const id = `feishu-user-${userKey(identity).slice(0, 16)}-legacy`;
+  session(user, id); const message = user.appendMessage({ sessionId: id, role: 'user', text: 'legacy body' }); user.confirmProfile('Alex');
+  manager.close();
+  const { DatabaseSync } = await import('node:sqlite');
+  const database = new DatabaseSync(path.join(root, userKey(identity), 'history.sqlite'));
+  try { database.exec('DROP TABLE user_identity'); } finally { database.close(); }
+  const reopened = await createHistoryStore({ root }); t.after(() => reopened.close());
+  const listed = reopened.listStoredUsers({ source: 'unknown-before-authentication' });
+  assert.equal(listed.length, 1); assert.equal(listed[0].identity, null); assert.equal(listed[0].store.getMessage(message.id).text, 'legacy body');
+  assert.equal(listed[0].store.getProfile().displayName, 'Alex');
+  assert.equal(reopened.forUser(identity), listed[0].store, 'reuse the scanned connection and backfill identity');
+  assert.deepEqual(reopened.listStoredUsers({ source: identity.source })[0].identity, identity);
+  assert.deepEqual(reopened.listStoredUsers({ source: 'unknown-before-authentication' }), []);
+  reopened.close();
+  const third = await createHistoryStore({ root }); t.after(() => third.close());
+  assert.deepEqual(third.listStoredUsers()[0].identity, identity); third.close();
+});
+
+test('maintenance ignores noncanonical entries and never creates missing databases', async t => {
+  const { root, manager } = await fixture(t);
+  const empty = path.join(root, 'a'.repeat(64)); mkdirSync(empty);
+  mkdirSync(path.join(root, 'invalid-name')); writeFileSync(path.join(root, 'invalid-name', 'history.sqlite'), 'not a database');
+  writeFileSync(path.join(root, 'b'.repeat(64)), 'not a user directory');
+  assert.equal(manager.listStoredUsers().length, 1);
+  assert.deepEqual(readdirSync(empty), []);
+  assert.throws(() => manager.listStoredUsers({ source: '' }), /source/);
+  manager.close(); assert.throws(() => manager.listStoredUsers(), /closed/);
+});
+
+test('maintenance surfaces corrupt SQLite databases rather than silently skipping them', async t => {
+  const { root, manager } = await fixture(t);
+  const invalid = path.join(root, '0'.repeat(64)); mkdirSync(invalid); writeFileSync(path.join(invalid, 'history.sqlite'), 'not sqlite');
+  assert.throws(() => manager.listStoredUsers(), /database|SQLite/i);
+});
+
+test('identity hash mismatch is rejected both during scanning and on cached forUser calls', async t => {
+  const { root, manager } = await fixture(t);
+  const { DatabaseSync } = await import('node:sqlite');
+  const database = new DatabaseSync(path.join(root, userKey(identity), 'history.sqlite'));
+  try { database.prepare('UPDATE user_identity SET openId = ? WHERE singleton = 1').run('different-user'); } finally { database.close(); }
+  assert.throws(() => manager.forUser(identity), /identity.*directory/);
+  assert.throws(() => manager.listStoredUsers({ source: 'different-source' }), /identity.*directory/, 'validate metadata even when filtering source');
+});
+
+test('maintenance rejects linked database files and journals without opening them', async t => {
+  const { root, manager } = await fixture(t);
+  const key = userKey(identity), original = path.join(root, key, 'history.sqlite');
+  const linkedDirectory = path.join(root, '0'.repeat(64)); mkdirSync(linkedDirectory);
+  const linked = path.join(linkedDirectory, 'history.sqlite'); linkSync(original, linked);
+  assert.throws(() => manager.listStoredUsers(), /hard links/); rmSync(linked); rmSync(linkedDirectory, { recursive: true });
+  const unrelated = path.join(root, 'unrelated'); writeFileSync(unrelated, 'keep');
+  const journal = `${original}-journal`; linkSync(unrelated, journal);
+  assert.throws(() => manager.listStoredUsers(), /hard links/); assert.throws(() => manager.forUser(identity), /hard links/);
+  rmSync(journal); assert.equal(manager.listStoredUsers().length, 1);
+});
+
+test('maintenance rejects symbolic user directories and dangling database symlinks', async t => {
+  const { root, manager } = await fixture(t);
+  const targetDirectory = path.join(root, 'target-directory'); mkdirSync(targetDirectory);
+  const linkedDirectory = path.join(root, '0'.repeat(64));
+  try { symlinkSync(targetDirectory, linkedDirectory, process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch (error) { if (process.platform === 'win32' && error.code === 'EPERM') { t.skip('Windows does not allow creating symlinks'); return; } throw error; }
+  assert.throws(() => manager.listStoredUsers(), /symbolic links/); rmSync(linkedDirectory);
+  mkdirSync(linkedDirectory);
+  try { symlinkSync(path.join(root, 'missing-file'), path.join(linkedDirectory, 'history.sqlite')); }
+  catch (error) { if (process.platform === 'win32' && error.code === 'EPERM') { t.diagnostic('Windows disallows file symlinks; directory junction rejection verified.'); return; } throw error; }
+  assert.throws(() => manager.listStoredUsers(), /symbolic links/);
+});

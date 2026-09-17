@@ -54,6 +54,11 @@ function fixture() {
     agentDefaultModel: { currentSelection: () => ({ provider: 'test', model: 'test-model' }) },
     workspaceRegistry: {
       get archivedSessionIds() { return [...archived]; },
+      archiveSession: async id => {
+        calls.push(['archive', id]);
+        if (!live.has(id) && !stored.has(id)) throw new Error('Unknown session');
+        archived.add(id);
+      },
       create: async path => {
         if (!workspaces.has(path)) workspaces.set(path, { path, sessionIds: [], attachSession: async id => {
           calls.push(['attach', id]);
@@ -275,5 +280,124 @@ test('workspace reattachment failure does not report a live session as ready', a
   await host.getOrCreate(request());
   f.ctx.workspaceRegistry.create = async () => { throw new Error('Registry unavailable'); };
   await assert.rejects(host.getOrCreate(request()), /Registry unavailable/);
+  await host.dispose();
+});
+
+test('retirement archives and releases an idle owned agent without deleting its log', async () => {
+  const f = fixture();
+  const host = createSessionHost(f.ctx, { isAuthorized: () => true });
+  const { agent } = await host.getOrCreate(request());
+  assert.equal(host.getLive(agent.session.id), agent);
+  const first = host.retire(agent.session.id);
+  assert.equal(host.retire(agent.session.id), first);
+  assert.equal(await first, true);
+  assert.equal(f.archived.has(agent.session.id), true);
+  assert.equal(host.getLive(agent.session.id), undefined);
+  assert.ok(f.stored.has(agent.session.id));
+  assert.equal(f.calls.filter(([name]) => name === 'dispose').length, 1);
+  assert.equal(await host.retire(agent.session.id), true);
+  assert.equal(f.calls.filter(([name]) => name === 'archive').length, 1);
+  await assert.rejects(host.getOrCreate(request()), { name: 'ArchivedSessionError' });
+  await host.dispose();
+});
+
+test('retirement defers busy agents without cancelling or hiding them', async () => {
+  const f = fixture();
+  const host = createSessionHost(f.ctx, { isAuthorized: () => true });
+  const { agent } = await host.getOrCreate(request());
+  agent.status = 'running';
+  assert.equal(await host.retire(agent.session.id), false);
+  assert.equal(f.archived.size, 0);
+  assert.equal(f.calls.some(([name]) => name === 'cancel' || name === 'dispose'), false);
+  agent.status = 'idle';
+  assert.equal(await host.retire(agent.session.id), true);
+  await host.dispose();
+});
+
+test('retirement handles UI-owned agents without taking their disposal capability', async () => {
+  const f = fixture();
+  const ui = f.agent(request().sessionId);
+  f.live.set(ui.session.id, ui);
+  const host = createSessionHost(f.ctx, { isAuthorized: () => true });
+  ui.status = 'running';
+  assert.equal(await host.retire(ui.session.id), false);
+  assert.equal(f.archived.size, 0);
+  ui.status = 'idle';
+  assert.equal(await host.retire(ui.session.id), true);
+  assert.equal(f.archived.has(ui.session.id), true);
+  assert.equal(host.getLive(ui.session.id), ui);
+  assert.equal(f.calls.some(([name]) => name === 'dispose' || name === 'cancel'), false);
+  await host.dispose();
+});
+
+test('retirement archives unloaded durable sessions and accepts definite missing logs', async () => {
+  const f = fixture();
+  const host = createSessionHost(f.ctx);
+  const id = request().sessionId;
+  f.stored.set(id, { header: { cwd: request().workspacePath } });
+  assert.equal(await host.retire(id), true);
+  assert.equal(f.archived.has(id), true);
+  assert.ok(f.stored.has(id));
+  assert.equal(await host.retire('feishu-user-missing'), true);
+  assert.equal(f.archived.has('feishu-user-missing'), false);
+  assert.equal(f.calls.some(([name]) => name === 'resume' || name === 'create'), false);
+  await assert.rejects(host.retire('ordinary'), /Only managed/);
+  assert.throws(() => host.getLive('ordinary'), /Only managed/);
+  assert.equal(f.calls.filter(([name]) => name === 'archive').length, 1);
+  await host.dispose();
+});
+
+test('retirement propagates storage failures and keeps live handles for retry', async () => {
+  const f = fixture();
+  const host = createSessionHost(f.ctx, { isAuthorized: () => true });
+  const { agent } = await host.getOrCreate(request());
+  const archive = f.ctx.workspaceRegistry.archiveSession;
+  f.ctx.workspaceRegistry.archiveSession = async () => { throw new Error('Archive storage failed'); };
+  await assert.rejects(host.retire(agent.session.id), /Archive storage failed/);
+  assert.equal(host.getLive(agent.session.id), agent);
+  assert.equal(f.calls.some(([name]) => name === 'dispose'), false);
+  f.ctx.workspaceRegistry.archiveSession = archive;
+  assert.equal(await host.retire(agent.session.id), true);
+  f.ctx.sessionPersistence.stat = async () => { throw new Error('Persistence unavailable'); };
+  await assert.rejects(host.retire('feishu-user-unknown'), /Persistence unavailable/);
+  await host.dispose();
+});
+
+test('retirement waits for an in-flight open and prevents concurrent reopening', async () => {
+  const f = fixture();
+  const host = createSessionHost(f.ctx, { isAuthorized: () => true });
+  let releaseSetup;
+  let notifySetup;
+  const setupStarted = new Promise(resolve => { notifySetup = resolve; });
+  const setupGate = new Promise(resolve => { releaseSetup = resolve; });
+  const opening = host.getOrCreate({ ...request(), setup: async () => { notifySetup(); await setupGate; } });
+  await setupStarted;
+  const retiring = host.retire(request().sessionId);
+  const reopening = assert.rejects(host.getOrCreate(request()), { name: 'ArchivedSessionError' });
+  assert.equal(f.calls.some(([name]) => name === 'archive'), false);
+  releaseSetup();
+  await opening;
+  assert.equal(await retiring, true);
+  await reopening;
+  assert.equal(f.calls.filter(([name]) => name === 'create').length, 1);
+  assert.equal(f.calls.filter(([name]) => name === 'dispose').length, 1);
+  await host.dispose();
+});
+
+test('a UI turn starting during archive is not disposed and retirement retries when idle', async () => {
+  const f = fixture();
+  const host = createSessionHost(f.ctx, { isAuthorized: () => true });
+  const { agent } = await host.getOrCreate(request());
+  const archive = f.ctx.workspaceRegistry.archiveSession;
+  f.ctx.workspaceRegistry.archiveSession = async id => {
+    await archive(id);
+    agent.status = 'running';
+  };
+  assert.equal(await host.retire(agent.session.id), false);
+  assert.equal(host.getLive(agent.session.id), agent);
+  assert.equal(f.calls.some(([name]) => name === 'cancel' || name === 'dispose'), false);
+  agent.status = 'idle';
+  assert.equal(await host.retire(agent.session.id), true);
+  assert.equal(f.calls.filter(([name]) => name === 'dispose').length, 1);
   await host.dispose();
 });

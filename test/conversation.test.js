@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createConversationFixture } from '../test-support/conversation-fixture.mjs';
 import { ArchivedSessionError } from '../lib/session-host.js';
+import { userKey } from '../lib/history-store.js';
+import { DatabaseSync } from 'node:sqlite';
+import { join } from 'node:path';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
@@ -55,19 +58,24 @@ test('archive rotation waits for in-flight and queued work and never routes the 
   assert.ok(f.replies.some(([id, text]) => id === 'queued' && text === 'queued result'));
 });
 
-test('archive remains effective after restart and only rotates the affected user/chat binding', async t => {
+test('chat switching and restart keep only one current session without merging histories', async t => {
   const f = await createConversationFixture(t);
   await f.send({ text: 'old private context' });
   const old = [...f.agents.values()][0];
   await f.claim(old); await f.finish(old);
   await f.send({ text: 'other chat', chatId: 'group' });
+  assert.equal(f.store().getCurrentSession('chat-a'), null);
+  assert.equal(f.archived.has(old.session.id), true);
   const group = f.agents.get(f.store().getCurrentSession('group').sessionId);
   await f.claim(group); await f.finish(group);
   f.archived.add(old.session.id);
   await f.restart();
   await f.send({ text: 'after restart' });
   assert.notEqual(f.store().getCurrentSession('chat-a').sessionId, old.session.id);
-  assert.equal(f.store().getCurrentSession('group').sessionId, group.session.id);
+  assert.equal(f.store().getCurrentSession('group'), null);
+  assert.equal(f.archived.has(group.session.id), true);
+  assert.equal(f.store().listCurrentSessions().length, 1);
+  assert.equal(f.store().searchMessages({ chatId: 'chat-a', query: 'other chat' }).length, 0);
 });
 
 for (const phase of ['during-resume', 'after-resume']) test(`archive ${phase} retries admission once and queues the message exactly once`, async t => {
@@ -78,8 +86,13 @@ for (const phase of ['during-resume', 'after-resume']) test(`archive ${phase} re
   const open = f.host.getOrCreate.bind(f.host);
   f.host.getOrCreate = async request => {
     if (request.sessionId === old.session.id) {
+      if (phase === 'after-resume') {
+        const handle = await open(request);
+        f.archived.add(old.session.id);
+        return handle;
+      }
       f.archived.add(old.session.id);
-      if (phase === 'during-resume') throw new ArchivedSessionError();
+      throw new ArchivedSessionError();
     }
     return open(request);
   };
@@ -125,7 +138,7 @@ test('separate authorized users have separate sessions, directories, databases a
   assert.equal(JSON.stringify(result).includes('alice private'), false);
 });
 
-test('one user switches chat only after active work finishes and each chat preserves its own context', async t => {
+test('one user switches chat only after active work finishes and histories stay isolated', async t => {
   const f = await createConversationFixture(t);
   await f.send({ text: 'private message', chatId: 'private' });
   const first = [...f.agents.values()][0];
@@ -137,11 +150,17 @@ test('one user switches chat only after active work finishes and each chat prese
   assert.equal(f.host.calls.length, 1);
   await f.finish(first, 'private answer');
   await second;
-  assert.notEqual(f.store().getCurrentSession('private').sessionId, f.store().getCurrentSession('group').sessionId);
+  assert.equal(f.store().getCurrentSession('private'), null);
+  assert.equal(f.archived.has(first.session.id), true);
+  assert.equal(f.store().listCurrentSessions().length, 1);
   const groupAgent = f.agents.get(f.store().getCurrentSession('group').sessionId);
   await f.claim(groupAgent); await f.finish(groupAgent, 'group answer');
   await f.send({ text: 'continue privately', chatId: 'private' });
-  assert.equal(f.host.calls.at(-1).sessionId, first.session.id);
+  assert.notEqual(f.host.calls.at(-1).sessionId, first.session.id);
+  assert.equal(f.store().getCurrentSession('group'), null);
+  assert.equal(f.archived.has(groupAgent.session.id), true);
+  assert.equal(f.store().listCurrentSessions().length, 1);
+  assert.equal(f.store().searchMessages({ chatId: 'private', query: 'private message' }).length, 1);
   assert.equal(f.store().searchMessages({ chatId: 'private', query: 'group' }).length, 0);
 });
 
@@ -170,6 +189,8 @@ test('/new preserves old work and queues next admission until all previous turns
   const current = f.store().getCurrentSession('chat-a');
   assert.notEqual(current.sessionId, old.session.id);
   assert.equal(f.store().getSession(old.session.id).closeReason, 'new');
+  assert.equal(f.archived.has(old.session.id), true);
+  assert.equal(f.store().listCurrentSessions().length, 1);
   assert.ok(f.replies.some(([id, text]) => id === 'old' && text === 'old answer'));
   assert.equal(f.store().searchMessages({ query: 'old task' }).length, 1);
   assert.equal(f.store().getMessageByFeishuId('new').sessionId, current.sessionId);
@@ -185,6 +206,7 @@ test('daily maintenance archives idle context and the next message gets a fresh 
   assert.equal(f.store().getCurrentSession('chat-a'), null);
   assert.equal(f.store().getSession(old.session.id).closeReason, 'daily-reset');
   assert.equal(f.agents.has(old.session.id), false, 'daily rotation releases the idle in-memory context');
+  assert.equal(f.archived.has(old.session.id), true, 'daily rotation also hides the old durable Harness session');
   await f.send({ text: 'today' });
   assert.notEqual(f.store().getCurrentSession('chat-a').sessionId, old.session.id);
   assert.equal(f.store().searchMessages({ query: 'yesterday' }).length, 1);
@@ -405,4 +427,186 @@ test('changing the administrator workspace root rotates the old context without 
   assert.notEqual(f.host.calls.at(-1).sessionId, old.session.id);
   assert.equal(f.store().getSession(old.session.id).closeReason, 'workspace-changed');
   assert.equal(f.store().searchMessages({ query: 'old workspace' }).length, 1);
+});
+
+test('restart archives previously closed durable sessions even without an in-memory binding', async t => {
+  const f = await createConversationFixture(t);
+  await f.send({ text: 'keep this old history', messageId: 'old-history' });
+  const old = [...f.agents.values()][0];
+  await f.claim(old); await f.finish(old, 'old result');
+  await tick(); // Drain the idle-triggered maintenance before simulating the old shutdown.
+  f.store().closeSession(old.session.id, { reason: 'new' });
+  assert.equal(f.archived.has(old.session.id), false);
+  // Simulate an older runtime exiting without retiring the visible log.
+  f.host.dispose = async () => { f.agents.clear(); };
+  await f.restart();
+  assert.equal(f.archived.has(old.session.id), true);
+  assert.equal(f.persistedSessions.has(old.session.id), true);
+  assert.equal(f.agents.size, 0);
+  assert.equal(f.host.calls.length, 0, 'cleanup never resumes historical agents');
+  assert.deepEqual(f.host.archiveCalls, [old.session.id]);
+  assert.equal(f.store().getMessageByFeishuId('old-history').text, 'keep this old history');
+  await f.send({ text: 'current task' });
+  const current = f.store().getCurrentSession('chat-a');
+  assert.notEqual(current.sessionId, old.session.id);
+  assert.deepEqual([...f.persistedSessions.keys()].filter(id => !f.archived.has(id)), [current.sessionId]);
+});
+
+for (const restartBeforeBoundary of [true, false]) test(`persisted daily reset runs without new messages when restarted ${restartBeforeBoundary ? 'before' : 'after'} 04:00`, async t => {
+  const f = await createConversationFixture(t, {
+    now: Date.parse('2026-09-16T19:59:00Z'),
+    config: { dailyResetTimezone: 'Asia/Macau', dailyResetHour: 4 },
+  });
+  await f.send({ text: 'before local four o’clock' });
+  const old = [...f.agents.values()][0];
+  await f.claim(old); await f.finish(old, 'saved before reset');
+  const replyCount = f.replies.length;
+  if (restartBeforeBoundary) {
+    await f.restart();
+    assert.equal(f.store().getCurrentSession('chat-a').sessionId, old.session.id);
+    assert.equal(f.archived.has(old.session.id), false);
+    f.advance(2 * 60 * 1000);
+    await f.dispose.maintenance();
+  } else {
+    f.advance(2 * 60 * 1000);
+    await f.restart();
+  }
+  assert.equal(f.store().getCurrentSession('chat-a'), null);
+  assert.equal(f.store().getSession(old.session.id).closeReason, 'daily-reset');
+  assert.equal(f.archived.has(old.session.id), true);
+  assert.equal(f.host.calls.length, 0);
+  assert.equal(f.replies.length, replyCount, 'scheduled cleanup sends no unsolicited reply');
+  assert.equal(f.store().searchMessages({ query: 'before local' }).length, 1);
+});
+
+test('startup reconciles duplicate current sessions to one visible current without merging chats', async t => {
+  const f = await createConversationFixture(t);
+  await f.send({ text: 'private old context' });
+  const first = [...f.agents.values()][0];
+  await f.claim(first); await f.finish(first, 'private result');
+  const key = userKey({ source: f.config.source, tenantId: 'tenant', openId: 'alice' });
+  const newestId = `feishu-user-${key.slice(0, 16)}-legacy-newer`;
+  f.store().ensureSession({ sessionId: newestId, chatId: 'group', dayKey: '2026-09-16', createdAt: '2026-09-16T06:00:01Z' });
+  f.store().appendMessage({ sessionId: newestId, role: 'user', text: 'group-only secret' });
+  f.store().setCurrentSession('group', newestId);
+  f.persistedSessions.set(newestId, { header: { cwd: first.session.header.cwd } });
+  assert.equal(f.store().listCurrentSessions().length, 2);
+  f.host.dispose = async () => { f.agents.clear(); };
+  await f.restart();
+  assert.deepEqual(f.store().listCurrentSessions().map(session => session.sessionId), [newestId]);
+  assert.equal(f.store().getSession(first.session.id).closeReason, 'duplicate-current');
+  assert.equal(f.archived.has(first.session.id), true);
+  assert.equal(f.archived.has(newestId), false);
+  assert.deepEqual([...f.persistedSessions.keys()].filter(id => !f.archived.has(id)), [newestId]);
+  assert.equal(f.store().searchMessages({ chatId: 'chat-a', query: 'group-only' }).length, 0);
+  assert.equal(f.store().searchMessages({ chatId: 'group', query: 'group-only' }).length, 1);
+});
+
+test('archive failure blocks a second visible session and retries without losing either incoming message', async t => {
+  const f = await createConversationFixture(t);
+  await f.send({ text: 'old day' });
+  const old = [...f.agents.values()][0];
+  await f.claim(old); await f.finish(old, 'saved');
+  const retire = f.host.retire.bind(f.host);
+  f.host.retire = async id => {
+    if (id === old.session.id) throw new Error('Archive storage unavailable');
+    return retire(id);
+  };
+  f.advance(24 * 60 * 60 * 1000);
+  await f.send({ text: 'keep failed admission', messageId: 'failed-archive' });
+  assert.equal(f.host.calls.length, 1);
+  assert.equal(f.archived.has(old.session.id), false);
+  assert.equal(f.store().getCurrentSession('chat-a'), null);
+  assert.match(f.replies.at(-1)[1], /原文已保存/);
+  assert.equal(f.store().getMessageByFeishuId('failed-archive').text, 'keep failed admission');
+  f.host.retire = retire;
+  await f.send({ text: 'retry admission', messageId: 'retry-archive' });
+  const current = f.store().getCurrentSession('chat-a');
+  assert.notEqual(current.sessionId, old.session.id);
+  assert.equal(f.archived.has(old.session.id), true);
+  assert.deepEqual([...f.persistedSessions.keys()].filter(id => !f.archived.has(id)), [current.sessionId]);
+  assert.equal(f.store().searchMessages({ query: 'keep failed admission' }).length, 1);
+  assert.equal(f.store().getMessageByFeishuId('retry-archive').sessionId, current.sessionId);
+});
+
+test('closed historical work resumed by Harness delays new admission despite no runtime binding', async t => {
+  const f = await createConversationFixture(t);
+  await f.send({ text: 'old durable context' });
+  const old = [...f.agents.values()][0];
+  await f.claim(old); await f.finish(old, 'saved');
+  await f.restart();
+  f.store().closeSession(old.session.id, { reason: 'new' });
+  old.status = 'running';
+  f.agents.set(old.session.id, old); // A UI resume has no current runtime binding.
+  await f.dispose.maintenance();
+  assert.equal(f.archived.has(old.session.id), false);
+  let admitted = false;
+  const arrival = f.send({ text: 'wait for the historical task', messageId: 'delayed' }).then(() => { admitted = true; });
+  await tick();
+  assert.equal(admitted, false);
+  assert.equal(f.host.calls.length, 0);
+  assert.equal(f.store().getMessageByFeishuId('delayed').text, 'wait for the historical task');
+  await f.idle(old);
+  await arrival;
+  const current = f.store().getCurrentSession('chat-a');
+  assert.notEqual(current.sessionId, old.session.id);
+  assert.equal(f.archived.has(old.session.id), true);
+  assert.equal(f.store().getMessageByFeishuId('delayed').sessionId, current.sessionId);
+});
+
+test('cancellation after Harness creation keeps the durable current ID for the next admission', async t => {
+  const f = await createConversationFixture(t);
+  const controller = new AbortController();
+  const open = f.host.getOrCreate.bind(f.host);
+  f.host.getOrCreate = async request => {
+    const handle = await open(request);
+    controller.abort(new Error('Delivery cancelled after Harness publication'));
+    return handle;
+  };
+  await f.send({ text: 'interrupted during admission', messageId: 'cancelled-create', signal: controller.signal });
+  const current = f.store().getCurrentSession('chat-a');
+  assert.ok(current);
+  const published = f.agents.get(current.sessionId);
+  assert.ok(published);
+  assert.equal(published.queue.length, 0);
+  assert.equal(f.store().getMessageByFeishuId('cancelled-create').text, 'interrupted during admission');
+  f.host.getOrCreate = open;
+  await f.send({ text: 'continue after cancellation', messageId: 'after-cancelled-create' });
+  assert.equal(f.store().getCurrentSession('chat-a').sessionId, current.sessionId);
+  assert.equal(f.agents.get(current.sessionId), published);
+  assert.equal(published.queue.length, 1);
+  assert.deepEqual([...f.persistedSessions.keys()].filter(id => !f.archived.has(id)), [current.sessionId]);
+  assert.equal(f.store().getMessageByFeishuId('after-cancelled-create').sessionId, current.sessionId);
+});
+
+test('first verified delivery backfills a legacy identity and enables reset after a later silent restart', async t => {
+  const f = await createConversationFixture(t, {
+    profiles: [], now: Date.parse('2026-09-16T19:58:00Z'),
+    config: { dailyResetTimezone: 'Asia/Macau', dailyResetHour: 4 },
+  });
+  f.store().confirmProfile('Alice');
+  await f.send({ text: 'legacy history before migration' });
+  const old = [...f.agents.values()][0];
+  await f.claim(old); await f.finish(old, 'legacy saved');
+  await tick();
+  const identity = { source: f.config.source, tenantId: 'tenant', openId: 'alice' };
+  const key = userKey(identity);
+  const database = new DatabaseSync(join(f.config.historyRoot, key, 'history.sqlite'));
+  try { database.exec('DELETE FROM user_identity'); } finally { database.close(); }
+  await f.restart();
+  const legacy = f.history.listStoredUsers({ source: f.config.source }).find(user => user.key === key);
+  assert.equal(legacy.identity, null, 'startup discovery must not invent platform identity');
+  assert.equal(legacy.store.getCurrentSession('chat-a').sessionId, old.session.id);
+  await f.send({ text: 'authenticated user returns' });
+  assert.deepEqual(f.history.listStoredUsers({ source: f.config.source }).find(user => user.key === key).identity, identity);
+  assert.equal(f.store().getCurrentSession('chat-a').sessionId, old.session.id);
+  const resumed = f.agents.get(old.session.id);
+  await f.claim(resumed); await f.finish(resumed, 'confirmed migration');
+  f.advance(4 * 60 * 1000);
+  await f.restart();
+  assert.equal(f.host.calls.length, 0, 'startup reset must not need another incoming message');
+  assert.equal(f.store().getCurrentSession('chat-a'), null);
+  assert.equal(f.store().getSession(old.session.id).closeReason, 'daily-reset');
+  assert.equal(f.archived.has(old.session.id), true);
+  assert.equal(f.store().searchMessages({ query: 'legacy history before migration' }).length, 1);
 });

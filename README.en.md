@@ -43,9 +43,9 @@ Actual settings UI captured in an isolated demo environment with no application 
 | Connection checks | Tests application credentials, displays WebSocket connection status, and detects local ngrok tunnels |
 | User access | Feishu app availability controls access; each user must provide and confirm a name before tasks, with no prefilled `open_id` or name list |
 | User isolation | Separate user workspaces and SQLite databases, with separate context per chat; identical names do not merge data |
-| Session controls | `/new`, `/whoami`, `/help`, `/status`; sessions use the name personally confirmed by the user |
+| Session controls | At most one current visible Harness session per user, named after their confirmed name; `/new`, `/whoami`, `/help`, `/status` |
 | History | Timestamped records; Agent tools can search, read, add notes, update, and soft-delete records belonging to the current user and chat |
-| Daily reset | Starts a fresh context at 04:00 Asia/Macau by default; waits for running work to finish and retains history |
+| Daily reset | Archives the old session at 04:00 Asia/Macau by default; the next message starts fresh context, after running work finishes; history and files remain |
 
 **Remote Feishu sessions only receive restricted workspace-file, personal-history, and current-message attachment tools.** Arbitrary shell execution, general MCP tools, and Feishu APIs that could access other users’ data are not exposed. Workspace-write only applies to the user’s own directory; read-only forbids workspace file changes. New users inherit the global permission preset. Existing per-user permission overrides from older configurations are retained. The local Harness administrator retains control of the host and stored data.
 
@@ -59,7 +59,7 @@ Or add the bot to a group and @mention it:
 
 > Update the proposal in my working directory using the requirements we discussed earlier.
 
-A corresponding session appears in Harness, and the plugin sends the final text reply when processing finishes. These are natural-language request examples; the result depends on the model, Agent preset, working directory, and permissions. Follow-up messages in the same chat reuse context. `/new` routes subsequent messages into a new session; it does not cancel running work. New work waits for the old task to finish.
+A corresponding session appears in Harness, and the plugin sends the final text reply when processing finishes. These are natural-language request examples; the result depends on the model, Agent preset, working directory, and permissions. Follow-up messages in the same chat reuse context. `/new`, or switching to another direct or group chat, archives the previous session before starting fresh context. Each user has at most one current visible session; running work finishes before the switch rather than being cancelled.
 
 ### Files, images, video, and audio
 
@@ -174,7 +174,7 @@ A successful credential test confirms application authentication. Saving the req
 | Permission preset | `workspace-write`; `read-only` is the only alternative, and full-access presets are rejected |
 | Working directory | A root for separate user subdirectories; select a dedicated empty directory before first use |
 | User access | Controlled through Feishu app availability; provide a name and reply `确认` before starting tasks |
-| Daily context reset | `04:00` in `Asia/Macau`; deferred until running work finishes, retaining history |
+| Daily context reset | `04:00` in `Asia/Macau`; archives the old session after running work finishes, retaining SQLite history and archived Harness logs |
 | Model | Uses the default Harness model configuration unless specified separately |
 | Non-secret configuration | Stored in `feishu-bot.json` under `DSH_HOME`; the default `DSH_HOME` is `~/.dsh` |
 | Secrets | Saved by the Harness credentials service; blank settings fields preserve existing values. Values supplied through environment variables must be changed in the startup environment |
@@ -183,7 +183,9 @@ Deleting a Feishu workspace in the Harness UI only removes its registration. The
 
 Archiving the active Feishu session in Harness causes the next ordinary Feishu message to start a new, visible session. Existing work finishes first. The old session stays archived and its history remains searchable; its model context is not copied into the new session. `/status` reports an archived current session.
 
-Databases are separated by stable source, tenant, and user identity. Names are stored in user profiles and used for session titles, not as database or workspace paths. Two users with the same name still have separate data. Each chat has independent context. History tools are restricted to records for the current user and chat, with timestamps stored in local SQLite databases.
+Databases are separated by stable source, tenant, and user identity. Names are stored in user profiles and used for session titles, not as database or workspace paths. Two users with the same name still have separate data. Switching between a user’s direct and group chats archives the previous active context before creating a new one. History tools remain restricted to records for the current user and chat, with timestamps stored in local SQLite databases.
+
+`/new` and daily resets archive the old entry from the current Harness session list while retaining SQLite history, archived Harness logs, and working files. A new session is created on the next message. On restart, the plugin also archives leftover entries for already-closed sessions. Legacy databases missing identity metadata are updated on the first verified Feishu message; subsequent daily resets run even when no new messages arrive.
 
 Ask the Agent to find an older discussion, add a project note, or correct a record. Updating or soft-deleting history does not rewrite original Harness logs, Feishu messages, or already-loaded model context. Send `/new` to refresh context afterward. History CRUD is not a full data-erasure mechanism.
 

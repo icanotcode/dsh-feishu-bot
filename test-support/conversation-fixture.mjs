@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHistoryStore } from '../lib/history-store.js';
 import { installFeishuRuntime } from '../lib/runtime.js';
+import { ArchivedSessionError, MANAGED_SESSION_PREFIX } from '../lib/session-host.js';
 
 /** Real SQLite history with an explicitly driven Harness inbox/turn lifecycle. */
 export async function createConversationFixture(t, options = {}) {
@@ -17,6 +18,8 @@ export async function createConversationFixture(t, options = {}) {
   const reactions = [];
   const warnings = [];
   const archived = new Set();
+  // Harness logs survive a runtime restart independently of its live agents.
+  const persistedSessions = new Map();
   const config = {
     source: 'test', workspacePath: workspace, historyRoot: join(root, 'history'),
     agentPreset: 'standard', permissionPreset: 'workspace-write', dailyResetTimezone: 'UTC', dailyResetHour: 4,
@@ -44,10 +47,11 @@ export async function createConversationFixture(t, options = {}) {
     deleteMessageReaction: async (...args) => { reactions.push(['delete', ...args]); },
     ...options.client,
   };
-  const fixture = { root, config, ctx, listeners, tools, replies, reactions, warnings, client, emit, archived };
+  const fixture = { root, config, ctx, listeners, tools, replies, reactions, warnings, client, emit, archived, persistedSessions };
   function makeHost() {
     const agents = new Map();
     const calls = [];
+    const archiveCalls = [];
     function createAgent(request) {
       const waiters = [];
       const events = [];
@@ -75,12 +79,29 @@ export async function createConversationFixture(t, options = {}) {
       return agent;
     }
     const host = {
-      agents, calls,
+      agents, calls, archiveCalls,
       isArchived: id => archived.has(id),
+      getLive(id) {
+        if (!id.startsWith(MANAGED_SESSION_PREFIX)) throw new Error('Only managed Feishu sessions can be inspected');
+        return agents.get(id);
+      },
       async getOrCreate(request) {
+        if (archived.has(request.sessionId)) throw new ArchivedSessionError();
         calls.push(request);
         if (!agents.has(request.sessionId)) agents.set(request.sessionId, createAgent(request));
+        persistedSessions.set(request.sessionId, { header: agents.get(request.sessionId).session.header });
         return { agent: agents.get(request.sessionId), dispose: async () => agents.delete(request.sessionId) };
+      },
+      async retire(id) {
+        if (!id.startsWith(MANAGED_SESSION_PREFIX)) throw new Error('Only managed Feishu sessions can be retired');
+        const agent = agents.get(id);
+        if (agent && agent.status !== 'idle') return false;
+        if (!archived.has(id) && (agent || persistedSessions.has(id))) {
+          archiveCalls.push(id);
+          archived.add(id);
+        }
+        await host.release(id);
+        return true;
       },
       async release(id) {
         const agent = agents.get(id);
