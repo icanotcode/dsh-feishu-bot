@@ -35,6 +35,77 @@ test('ordinary conversation passes through until email is requested; mandatory g
   assert.deepEqual(await app.handle('现在聊别的'), { handled: false });
 });
 
+test('unknown provider discovery probes without credentials then requests the code and retains the pending task', async () => {
+  const calls = [];
+  const app = fixture({
+    discover: async (...args) => { calls.push(['discover', ...args]); return { status: 'found', smtp: { host: 'submission.company.example', port: 587, mode: 'starttls' } }; },
+    probe: async (...args) => { calls.push(['probe', ...args]); return { verified: true }; },
+  });
+  await app.handle('/mail setup', { pendingRequest: { messageId: 'send-original', requestText: 'Send my report.', recipient: 'to@example.com' } });
+  const step = await app.handle('sender@company.example');
+  assert.equal(step.discover, true);
+  assert.equal((await app.flow.getIngressState(alice)).stage, 'awaiting_discovery');
+  await app.handle('/mail code', { secret: 'premature-secret' });
+  assert.equal(app.verified.length, 0);
+  const result = await app.flow.discover(alice, { chatId: 'private-a' });
+  assert.match(result.reply, /授权码/);
+  assert.equal(calls[0][1], 'sender@company.example');
+  assert.equal(calls[1][1].host, 'submission.company.example');
+  assert.doesNotMatch(JSON.stringify(calls), /premature-secret|password/);
+  assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_code');
+  assert.equal(app.verified.length, 0);
+  const completed = await app.handle('/mail code', { secret: 'real-test-code' });
+  assert.deepEqual(completed.resume, { messageId: 'send-original', requestText: 'Send my report.' });
+  assert.equal(app.verified[0][2].publicOnly, true);
+  assert.equal((await app.flow.getAccount(alice)).publicOnly, true);
+  await app.flow.discover(alice, { chatId: 'private-a' });
+  assert.equal(calls.length, 2, 'ready bindings are not reconfigured by a repeated discovery call');
+});
+
+test('unavailable discovery and failed TLS probing keep the task without asking for SMTP parameters', async () => {
+  for (const probeFails of [false, true]) {
+    const app = fixture({ discover: async () => probeFails ? { status: 'found', smtp: { host: 'smtp.company.example', port: 465, mode: 'tls' } } : { status: 'not_found' },
+      probe: async () => { throw new Error('private diagnostic'); } });
+    await app.handle('/mail setup', { pendingRequest: { messageId: 'send-original', requestText: 'Send the report.' } });
+    await app.handle('sender@company.example');
+    const failed = await app.flow.discover(alice, { chatId: 'private-a' });
+    assert.match(failed.reply, /\/mail retry/);
+    assert.doesNotMatch(failed.reply, /\/mail server|private diagnostic/);
+    assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_discovery');
+    assert.equal((await app.handle('/mail retry')).discover, true);
+    assert.match(JSON.stringify([...app.values]), /send-original/);
+    assert.equal(app.verified.length, 0);
+    assert.equal(await app.flow.getAccount(alice), null);
+  }
+});
+
+test('discovery probes published alternates without credentials when the primary endpoint is unavailable', async () => {
+  const primary = { host: 'primary.example.com', port: 465, mode: 'tls' };
+  const alternate = { host: 'alternate.example.com', port: 587, mode: 'starttls' };
+  const tried = [];
+  const app = fixture({ discover: async () => ({ status: 'found', smtp: primary, candidates: [{ smtp: primary }, { smtp: alternate }] }),
+    probe: async config => { tried.push(config.host); if (config.host === primary.host) throw new Error('unavailable'); } });
+  await app.handle('/mail'); await app.handle('sender@company.example');
+  assert.match((await app.flow.discover(alice, { chatId: 'private-a' })).reply, /授权码/);
+  assert.deepEqual(tried, [primary.host, alternate.host]);
+  assert.equal(app.verified.length, 0);
+  await app.handle('/mail code', { secret: 'test-code' });
+  assert.equal(app.verified[0][0].host, alternate.host);
+});
+
+test('discovery is bound to the current user and private chat, and abort never saves a discovered server', async () => {
+  const abort = new AbortController();
+  let calls = 0;
+  const app = fixture({ discover: async () => { calls++; abort.abort(); return { status: 'found', smtp: { host: 'smtp.company.example', port: 465, mode: 'tls' } }; }, probe: async () => assert.fail('cancelled before probing') });
+  await app.handle('/mail'); await app.handle('sender@company.example');
+  await app.flow.discover(bob, { chatId: 'private-a' });
+  await app.flow.discover(alice, { chatId: 'different-private' });
+  assert.equal(calls, 0);
+  await assert.rejects(app.flow.discover(alice, { chatId: 'private-a', signal: abort.signal }), { name: 'AbortError' });
+  assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_discovery');
+  assert.doesNotMatch(JSON.stringify([...app.values]), /smtp.company.example/);
+});
+
 test('verified account and recipient survive restart in credentials, with no public secret', async () => {
   const app = fixture();
   await app.ready();
@@ -127,9 +198,9 @@ test('explicit SMTP configuration supports arbitrary hosts and ports for TLS and
   ]) {
     const app = fixture();
     assert.match((await app.handle('/mail')).reply, /邮箱提供商/);
-    assert.match((await app.handle('sender@example.com')).reply, /\/mail server/);
-    assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_server');
-    assert.match((await app.handle('some arbitrary text')).reply, /\/mail server/);
+    assert.equal((await app.handle('sender@example.com')).discover, true);
+    assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_discovery');
+    assert.equal((await app.handle('some arbitrary text')).discover, true);
     const result = await app.handle(`/mail server ${host} ${port} ${mode}`);
     assert.ok(result.reply.includes(`${host.toLowerCase()}:${port}`));
     assert.match(result.reply, /不要发送邮箱登录密码或飞书应用 App Secret/);

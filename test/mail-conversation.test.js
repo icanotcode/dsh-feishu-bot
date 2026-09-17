@@ -11,12 +11,12 @@ async function fixture(t, options = {}) {
   const credentials = { resolve: async ref => secrets.has(ref) ? { value: secrets.get(ref), source: 'file' } : undefined,
     set: async (ref, value) => secrets.set(ref, value), unset: async ref => secrets.delete(ref) };
   const verifications = [], sends = [];
-  const flow = createMailUserFlow({ credentials }, { verify: async (...args) => { verifications.push(args); return { verified: true }; } });
+  const flow = createMailUserFlow({ credentials }, { verify: async (...args) => { verifications.push(args); return { verified: true }; }, ...options.flow });
   const app = await createConversationFixture(t, { context: { credentials }, mail: { flow,
     send: async (...args) => { sends.push(args); return options.send ? options.send(...args) : { status: 'accepted', accepted: args[2].to, rejected: [] }; } } });
   const execute = (name, agent, args = {}, callId = name) => app.tools.get(name).execute(args, { agent, callId, signal: new AbortController().signal });
   async function setup(user = 'alice', chatId = 'chat-a') {
-    for (const text of ['/mail', `${user}@example.com`, '/mail server smtp.example.com 465 tls', `/mail code test-only-${user}-auth`, `recipient-${user}@example.com`]) await app.send({ senderId: user, chatId, text });
+    for (const text of ['/mail', `${user}@qq.com`, '/mail server smtp.example.com 465 tls', `/mail code test-only-${user}-auth`, `recipient-${user}@example.com`]) await app.send({ senderId: user, chatId, text });
   }
   async function active(user = 'alice', chatId = 'chat-a', text = '请发送邮件：主题测试，正文你好', messageId) {
     await app.send({ senderId: user, chatId, text, messageId });
@@ -38,7 +38,7 @@ test('ordinary messages load the skill without requiring a mailbox; natural emai
   const setup = await f.execute('feishu_mail_setup', agent);
   assert.match(setup.data.reply, /本人.*邮箱/);
   await f.finish(agent);
-  await f.send({ text: 'alice@example.com' });
+  await f.send({ text: 'alice@qq.com' });
   await f.send({ text: '/mail server smtp.example.com 587 starttls' });
   await f.send({ text: 'test-only-plain-auth' });
   await f.send({ text: 'target@example.com' });
@@ -60,7 +60,7 @@ test('personal SMTP tools use the bound sender and recipient, constrain attachme
   const first = await f.execute('feishu_send_email', agent, args, 'first');
   const second = await f.execute('feishu_send_email', agent, args, 'retry');
   assert.deepEqual(first, second); assert.equal(f.sends.length, 1);
-  assert.equal(f.sends[0][0].from, 'alice@example.com');
+  assert.equal(f.sends[0][0].from, 'alice@qq.com');
   assert.equal(f.sends[0][1], 'test-only-alice-auth');
   assert.deepEqual(f.sends[0][2].to, ['recipient-alice@example.com']);
   assert.equal(f.sends[0][2].attachments[0].content.toString(), 'report content');
@@ -82,8 +82,8 @@ test('two users cannot send from each other’s mailbox or query mailbox details
   await f.execute('feishu_send_email', alice, { subject: 'Alice', text: 'a' });
   await f.execute('feishu_send_email', bob, { subject: 'Bob', text: 'b' });
   assert.deepEqual(f.sends.map(call => [call[0].from, call[1], call[2].to[0]]), [
-    ['alice@example.com', 'test-only-alice-auth', 'recipient-alice@example.com'],
-    ['bob@example.com', 'test-only-bob-auth', 'recipient-bob@example.com'],
+    ['alice@qq.com', 'test-only-alice-auth', 'recipient-alice@example.com'],
+    ['bob@qq.com', 'test-only-bob-auth', 'recipient-bob@example.com'],
   ]);
   await f.finish(alice); await f.finish(bob);
   await f.send({ text: '普通群聊', chatId: 'group-a', chatType: 'group' });
@@ -159,7 +159,7 @@ test('missing recipient is asked once and completing it continues only that user
   await f.send({ text: 'private-alice-code' });
   assert.match(f.replies.at(-1)[1], /收件邮箱/);
   assert.equal(initial.queue.length, 0);
-  await f.send({ text: 'bob@example.com', senderId: 'bob', chatId: 'chat-b' });
+  await f.send({ text: 'bob@qq.com', senderId: 'bob', chatId: 'chat-b' });
   assert.equal(initial.queue.length, 0);
   await f.send({ text: '/mail to target@example.com' });
   assert.equal(initial.queue.length, 1);
@@ -185,4 +185,37 @@ test('manual mailbox setup and cancelled send setup do not enqueue automatic sen
   await f.send({ text: 'new-target@example.com' });
   assert.equal(initial.queue.length, 0);
   assert.equal(f.sends.length, 0);
+});
+
+test('unknown domains automatically enter Agent discovery and continue sending after code without technical questions', async t => {
+  const discoveries = [], probes = [];
+  const f = await fixture(t, { flow: {
+    discover: async (...args) => { discoveries.push(args); return { status: 'found', smtp: { host: 'submission.enterprise.example', port: 587, mode: 'starttls' }, source: { kind: 'autoconfig' } }; },
+    probe: async (...args) => { probes.push(args); return { verified: true }; },
+  } });
+  const original = '发送到 recipient@example.com，主题 Automatic，正文 Hello.';
+  const agent = await f.active('alice', 'chat-a', original, 'unknown-domain-send');
+  await f.execute('feishu_mail_setup', agent, { resumeSend: true, recipient: 'recipient@example.com' });
+  await f.finish(agent);
+  await f.send({ text: 'sender@enterprise.example' });
+  assert.equal(agent.queue.length, 1, 'email alone must enqueue service research');
+  assert.match(JSON.stringify(agent.queue), /请调用 feishu_mail_discover/);
+  await f.claim(agent);
+  await assert.rejects(f.execute('feishu_mail_discover', agent, { email: 'victim@another.example' }), /additional|unexpected|unknown|allowed/i);
+  const found = await f.execute('feishu_mail_discover', agent);
+  assert.match(found.data.reply, /授权码/);
+  assert.equal(discoveries[0][0], 'sender@enterprise.example');
+  assert.equal(probes[0][0].host, 'submission.enterprise.example');
+  assert.equal(f.verifications.length, 0, 'discovery does not authenticate');
+  assert.equal(f.sends.length, 0);
+  await f.finish(agent, found.data.reply);
+  await f.send({ text: 'secret-for-unknown-domain' });
+  assert.equal(agent.queue.length, 1);
+  assert.ok(JSON.stringify(agent.queue).includes(original));
+  assert.doesNotMatch(JSON.stringify(agent.queue), /secret-for-unknown-domain/);
+  await f.claim(agent);
+  await f.execute('feishu_send_email', agent, { subject: 'Automatic', text: 'Hello.' });
+  assert.equal(f.sends[0][0].host, 'submission.enterprise.example');
+  assert.equal(f.sends[0][3].publicOnly, true);
+  assert.deepEqual(f.sends[0][2].to, ['recipient@example.com']);
 });

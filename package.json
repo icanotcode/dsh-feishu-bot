@@ -32,6 +32,7 @@
     "@deepseek-ai/dsh-util-values": "^0.1.5-rc.2",
     "@deepseek-ai/schemastery": "^3.18.2",
     "@larksuiteoapi/node-sdk": "1.74.0",
+    "fast-xml-parser": "^5.11.1",
     "js-yaml": "^4.1.0",
     "nodemailer": "10.0.10"
   },

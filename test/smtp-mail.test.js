@@ -4,7 +4,7 @@ import nodemailer from 'nodemailer';
 import { createServer } from 'node:net';
 import { createServer as createTlsServer } from 'node:tls';
 import { once } from 'node:events';
-import { sendSmtpMail, verifySmtp, validateSmtpConfig, validateMailInput, SmtpMailError, SMTP_LIMITS } from '../lib/smtp-mail.js';
+import { sendSmtpMail, verifySmtp, probeSmtp, validateSmtpConfig, validateMailInput, SmtpMailError, SMTP_LIMITS } from '../lib/smtp-mail.js';
 import { smtpTestKey, smtpTestCertificate } from '../test-support/smtp-tls-fixture.mjs';
 
 const config = { host: 'smtp.example.com', port: 465, mode: 'tls', user: 'sender@example.com', from: 'sender@example.com' };
@@ -295,4 +295,103 @@ test('real TLS verification rejects an untrusted SMTP certificate before authent
   await assert.rejects(verifySmtp(local.config, password, { timeoutMs: 3000 }), code('TLS_FAILED'));
   assert.equal(local.authenticated(), false);
   assert.deepEqual(local.transcript, []);
+});
+
+
+const resolveLoopback = async () => ({ address: '127.0.0.1', family: 4 });
+
+test('SMTP discovery probe has no authentication configuration and never submits a message', async () => {
+  const state = mockTransport();
+  assert.deepEqual(await probeSmtp(config, state), { verified: true });
+  assert.equal(state.options.auth, undefined);
+  assert.equal(state.options.forceAuth, false);
+  assert.equal(state.options.tls.rejectUnauthorized, true);
+  assert.equal(state.verifies, 1); assert.equal(state.sends.length, 0);
+  const authenticated = mockTransport();
+  await verifySmtp(config, password, authenticated);
+  assert.equal(authenticated.options.forceAuth, true);
+  assert.deepEqual(authenticated.options.auth, { user: config.user, pass: password });
+});
+
+test('real TLS SMTP discovery checks EHLO without AUTH even when the server advertises authentication', async t => {
+  const local = await tlsSmtpServer(t);
+  assert.deepEqual(await probeSmtp(local.config, { resolveHost: resolveLoopback, transportFactory: local.transportFactory, timeoutMs: 3000 }), { verified: true });
+  assert.match(local.transcript[0], /^EHLO /);
+  assert.ok(local.transcript.every(line => !/^(?:AUTH|MAIL FROM|RCPT TO|DATA)/.test(line)));
+  assert.equal(local.authenticated(), false);
+});
+
+test('SMTP discovery verifies the certificate before any SMTP commands', async t => {
+  const local = await tlsSmtpServer(t);
+  await assert.rejects(probeSmtp(local.config, { resolveHost: resolveLoopback, timeoutMs: 3000 }), code('TLS_FAILED'));
+  assert.deepEqual(local.transcript, []);
+});
+
+test('SMTP discovery cannot downgrade if the server refuses STARTTLS', async t => {
+  let transcript = '';
+  const local = await smtpServer(t, socket => {
+    socket.write('220 test SMTP ready\r\n');
+    socket.on('data', chunk => {
+      const text = chunk.toString(); transcript += text;
+      if (/EHLO/.test(text)) socket.write('250-test\r\n250 AUTH PLAIN LOGIN\r\n');
+      else if (/STARTTLS/.test(text)) socket.write('454 TLS unavailable\r\n');
+    });
+  });
+  await assert.rejects(probeSmtp({ ...local, mode: 'starttls' }, { resolveHost: resolveLoopback, timeoutMs: 2000 }), code('TLS_FAILED'));
+  assert.match(transcript, /STARTTLS/);
+  assert.doesNotMatch(transcript, /AUTH|MAIL FROM|RCPT TO|DATA/);
+});
+
+test('SMTP discovery timeout and cancellation close raw sockets without attempting authentication', async t => {
+  for (const cancel of [false, true]) {
+    const controller = new AbortController();
+    let closed;
+    const local = await smtpServer(t, socket => {
+      closed = once(socket, 'close');
+      if (cancel) controller.abort();
+    });
+    await assert.rejects(probeSmtp({ ...local, mode: 'starttls' }, { resolveHost: resolveLoopback, signal: controller.signal, timeoutMs: cancel ? 2000 : 50 }), error => error.code === (cancel ? 'CANCELLED' : 'TIMEOUT') && !error.uncertain);
+    await closed;
+  }
+});
+
+test('SMTP discovery refuses private literal destinations by default, even if publicOnly false is requested', async () => {
+  for (const host of ['127.0.0.1', '10.0.0.1', '169.254.169.254', '::1', '::ffff:127.0.0.1']) {
+    await assert.rejects(probeSmtp({ ...config, host }, { publicOnly: false, timeoutMs: 500 }), code('CONNECTION_FAILED'));
+  }
+});
+
+test('publicOnly verification and submission connect to the validated IP and retain hostname TLS checks', async t => {
+  const local = await tlsSmtpServer(t);
+  const lookedUp = [];
+  const resolveHost = async host => { lookedUp.push(host); return resolveLoopback(); };
+  // The test certificate is issued for loopback, so another hostname must fail,
+  // proving pinning an IP never substitutes it for certificate hostname checks.
+  await assert.rejects(verifySmtp({ ...local.config, host: 'smtp.example.invalid' }, password, {
+    publicOnly: true, resolveHost, transportFactory: local.transportFactory, timeoutMs: 2000,
+  }), code('TLS_FAILED'));
+  assert.deepEqual(lookedUp, ['smtp.example.invalid']);
+  assert.deepEqual(local.transcript, []);
+  await assert.rejects(sendSmtpMail({ ...config, host: '127.0.0.1' }, password, input, { publicOnly: true, timeoutMs: 500 }), error => error.code !== 'TIMEOUT');
+});
+
+test('aborted discovery DNS lookup cannot establish a late socket', async () => {
+  const controller = new AbortController();
+  let resolve;
+  const lookup = new Promise(done => { resolve = done; });
+  const pending = probeSmtp(config, { resolveHost: () => lookup, signal: controller.signal, timeoutMs: 2000 });
+  controller.abort();
+  await assert.rejects(pending, code('CANCELLED'));
+  resolve({ address: '127.0.0.1', family: 4 });
+  await new Promise(done => setImmediate(done));
+});
+
+
+test('publicOnly refuses loopback before opening sockets for probes, verification and submission', async t => {
+  let connections = 0;
+  const local = await smtpServer(t, () => { connections++; });
+  await assert.rejects(probeSmtp(local, { timeoutMs: 500 }), code('CONNECTION_FAILED'));
+  await assert.rejects(verifySmtp(local, password, { publicOnly: true, timeoutMs: 500 }), code('CONNECTION_FAILED'));
+  await assert.rejects(sendSmtpMail(local, password, input, { publicOnly: true, timeoutMs: 500 }), code('CONNECTION_FAILED'));
+  assert.equal(connections, 0);
 });

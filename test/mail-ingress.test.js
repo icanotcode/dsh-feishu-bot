@@ -73,6 +73,15 @@ test('pending authorization allows valid SMTP settings but still redacts malform
   assert.equal(f.deliveries[1].event.payload.parsed.userText, '/mail code');
 });
 
+test('codes sent during provider discovery stay secret and only explicit retry commands reach the task handler', async () => {
+  const f = fixture({ getIngressState: async () => ({ stage: 'awaiting_discovery', chatId: 'chat-a' }) });
+  await f.receive(payload('early-private-code', { id: 'discovery-code' }), { authenticated: true });
+  await f.receive(payload('/mail retry', { id: 'discovery-retry' }), { authenticated: true });
+  assert.doesNotMatch(JSON.stringify(f.deliveries), /early-private-code/);
+  assert.equal(f.deliveries[0].event.payload.parsed.userText, '/mail code');
+  assert.equal(f.deliveries[1].event.payload.parsed.userText, '/mail retry');
+});
+
 test('concurrent HTTP/SDK retries are admitted once and failure is retryable without retaining a secret', async () => {
   const f = fixture();
   let release; const paused = new Promise(resolve => { release = resolve; });
