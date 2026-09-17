@@ -78,6 +78,98 @@ window.__ModuleLoader__.load({
       return data;
     }
 
+    function ProjectPicker({ id, label, value, onChange, botId, disabled }) {
+      const [open, setOpen] = useState(false);
+      const [query, setQuery] = useState('');
+      const [projects, setProjects] = useState([]);
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState('');
+      const [warning, setWarning] = useState('');
+      const [reload, setReload] = useState(0);
+      const [activeIndex, setActiveIndex] = useState(-1);
+      const listId = `${id}-results`;
+      useEffect(() => {
+        if (!open) return;
+        let active = true;
+        setLoading(true); setError(''); setWarning('');
+        request('projects').then(data => {
+          if (!active) return;
+          setProjects(data.projects); setWarning(data.warning || '');
+        }).catch(cause => { if (active) setError(cause.message); })
+          .finally(() => { if (active) setLoading(false); });
+        return () => { active = false; };
+      }, [open, reload]);
+      useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
+      const tokens = query.normalize('NFKC').toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
+      const filtered = projects.filter(project => {
+        const text = `${project.name} ${project.path}`.normalize('NFKC').toLocaleLowerCase();
+        return tokens.every(token => text.includes(token));
+      });
+      const unavailable = project => project.available === false || Boolean(project.botId && project.botId !== botId);
+      function close(restoreFocus = false) {
+        setOpen(false); setActiveIndex(-1);
+        if (restoreFocus) document.getElementById(id)?.focus?.();
+      }
+      function choose(project) {
+        if (disabled || loading || error || unavailable(project)) return;
+        onChange(project.path); close(true);
+      }
+      function navigate(event) {
+        if (event.nativeEvent?.isComposing || event.isComposing) return;
+        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(true); return; }
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          if (!loading && !error && filtered[activeIndex]) choose(filtered[activeIndex]);
+          return;
+        }
+        if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) || loading || error) return;
+        event.preventDefault();
+        const indices = filtered.map((project, index) => unavailable(project) ? -1 : index).filter(index => index >= 0);
+        if (!indices.length) return;
+        const previous = indices.indexOf(activeIndex);
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? indices.length - 1
+          : event.key === 'ArrowDown' ? (previous + 1) % indices.length
+            : previous <= 0 ? indices.length - 1 : previous - 1;
+        setActiveIndex(indices[next]);
+        document.getElementById(`${listId}-${indices[next]}`)?.scrollIntoView?.({ block: 'nearest' });
+      }
+      return h('div', { className: 'feishu-field feishu-project-picker',
+        onBlur: event => { if (!event.currentTarget.contains(event.relatedTarget)) close(); } },
+        h('label', { htmlFor: id }, label),
+        h('button', { id, type: 'button', value: value || '', disabled,
+          className: 'feishu-project-trigger', 'aria-expanded': open, 'aria-controls': `${id}-panel`,
+          'aria-label': `${label}：${value || '未选择'}，搜索项目`,
+          onClick: () => { if (open) close(); else { setQuery(''); setActiveIndex(-1); setOpen(true); } } },
+          h('span', { className: value ? 'feishu-project-value' : 'feishu-project-value feishu-muted' }, value || '请选择 Harness 项目目录'),
+          h('span', { className: 'feishu-project-search-label' }, '⌕ 搜索项目 ', h('span', { 'aria-hidden': true }, open ? '▴' : '▾'))),
+        open && h('div', { id: `${id}-panel`, className: 'feishu-project-panel', onKeyDown: event => { if (event.key === 'Escape') navigate(event); } },
+          h('label', { htmlFor: `${id}-query`, className: 'feishu-sr-only' }, `搜索${label}`),
+          h('input', { id: `${id}-query`, type: 'search', role: 'combobox', value: query, autoFocus: true,
+            onKeyDown: navigate, autoComplete: 'off', placeholder: '搜索项目名称或目录路径…', 'aria-autocomplete': 'list',
+            'aria-expanded': true, 'aria-controls': listId,
+            'aria-activedescendant': !loading && !error && filtered[activeIndex] ? `${listId}-${activeIndex}` : undefined,
+            onChange: event => { setQuery(event.target.value); setActiveIndex(-1); } }),
+          h('div', { className: 'feishu-project-summary' },
+            h('span', { role: 'status' }, loading ? '正在读取 Harness 项目…' : error ? '项目列表读取失败' : `${filtered.length} 个匹配项目`),
+            h('button', { type: 'button', disabled: loading, onClick: () => { setActiveIndex(-1); setReload(reload + 1); } }, error ? '重试' : '刷新列表')),
+          error && h('p', { role: 'alert', className: 'feishu-error' }, error),
+          warning && h('p', { role: 'status', className: 'feishu-muted' }, warning),
+          h('div', { id: listId, role: 'listbox', 'aria-label': 'Harness 项目目录', 'aria-busy': loading, className: 'feishu-project-results' },
+            !loading && !error && filtered.map((project, index) => h('button', {
+              key: project.path, id: `${listId}-${index}`, type: 'button', role: 'option', tabIndex: -1,
+              disabled: unavailable(project), 'aria-selected': project.path === value,
+              className: `feishu-project-option${activeIndex === index ? ' is-active' : ''}`,
+              onMouseDown: event => event.preventDefault(), onClick: () => choose(project)
+            }, h('span', { className: 'feishu-project-option-title' }, project.name,
+              project.path === value ? h('span', null, '当前选择') : project.botId === botId && botId ? h('span', null, '此机器人已绑定') : null),
+              h('span', { className: 'feishu-project-path' }, project.path),
+              project.available === false ? h('small', null, '目录不存在或无法访问')
+                : project.botId && project.botId !== botId ? h('small', null, `已由「${project.botName || '其他机器人'}」使用`)
+                  : null))),
+          !loading && !error && !filtered.length && h('p', { className: 'feishu-muted' }, projects.length ? '没有匹配的项目，请换个名称或路径关键词。' : '暂无项目。请先在 Harness 中添加项目，再刷新列表。')),
+        h('small', null, '从 Harness 已添加的项目中选择；每个机器人独占一个目录，用户文件保存在其独立子目录中。选择后保存配置生效。'));
+    }
+
     function FeishuSettings() {
       const prefix = useId();
       const [bots, setBots] = useState([]);
@@ -165,11 +257,7 @@ window.__ModuleLoader__.load({
               h('label', { htmlFor: `${prefix}-new-bot-name` }, '新机器人名称'),
               h('input', { id: `${prefix}-new-bot-name`, value: newName, required: true, maxLength: 80, disabled: blocked,
                 onChange: event => setNewName(event.target.value) })),
-            h('div', { className: 'feishu-field' },
-              h('label', { htmlFor: `${prefix}-new-bot-path` }, '新机器人项目目录'),
-              h('input', { id: `${prefix}-new-bot-path`, value: newPath, required: true, disabled: blocked,
-                onChange: event => setNewPath(event.target.value) }),
-              h('small', null, '填写本机已存在的绝对目录；请为不同机器人选择独立目录。')),
+            h(ProjectPicker, { id: `${prefix}-new-bot-path`, label: '新机器人项目目录', value: newPath, onChange: setNewPath, disabled: blocked }),
             h('button', { type: 'submit', disabled: blocked || !newName.trim() || !newPath.trim(), className: 'feishu-primary' }, busy ? '添加中…' : '创建机器人'))),
         error && h('div', { role: 'alert', className: 'feishu-error' }, error,
           !bots.length && h('button', { type: 'button', onClick: () => setReload(reload + 1) }, '重新加载机器人列表')),
@@ -348,7 +436,7 @@ window.__ModuleLoader__.load({
               h('section', null,
                 h('h3', null, '任务处理'),
                 h('p', { className: 'feishu-muted' }, '处理任务时会给原消息添加 Typing（敲键盘）表情，结束后移除。需要应用权限 im:message.reactions:write_only；请在飞书开放平台开通并发布生效。缺少权限时仍会处理消息，但无法显示状态表情。'),
-                field('workspacePath', '项目目录（用户工作目录根路径）', { placeholder: '/path/to/workspaces', hint: '必须是已存在的绝对路径。插件在此为每位用户创建独立子目录；请使用专门的空目录。' }),
+                h(ProjectPicker, { id: `${prefix}-workspacePath`, label: '项目目录（用户工作目录根路径）', value: config.workspacePath, botId, disabled: Boolean(busy), onChange: value => edit('workspacePath', value) }),
                 field('agentPreset', 'Agent 预设', { hint: '填写当前 Harness 已安装的预设名称，例如 standard。' }),
                 field('permissionPreset', '权限预设', { choices: [
                   ['read-only', '只读'], ['workspace-write', '工作区写入']
@@ -467,6 +555,18 @@ window.__ModuleLoader__.load({
       .feishu-settings button{border:1px solid var(--dsw-alias-border-l4,#ccc);border-radius:8px;padding:8px 14px;background:var(--dsw-alias-bg-layer-3,#fff);color:inherit;font:inherit;cursor:pointer;white-space:nowrap}
       .feishu-settings button:disabled{opacity:.55;cursor:default}.feishu-settings .feishu-primary{background:var(--dsw-alias-brand-primary,#4d6bfe);border-color:transparent;color:white}
       .feishu-settings :is(input,select,textarea,button,a):focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4d6bfe);outline-offset:2px}
+      .feishu-settings .feishu-project-trigger{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;text-align:left;white-space:normal}
+      .feishu-project-value{min-width:0;overflow-wrap:anywhere}.feishu-project-search-label{flex-shrink:0;color:var(--dsw-alias-brand-primary,#4d6bfe)}
+      .feishu-project-panel{border:1px solid var(--dsw-alias-border-l4,#ccc);border-radius:10px;padding:10px;background:var(--dsw-alias-bg-layer-3,#fff)}
+      .feishu-project-summary{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:8px 0;color:var(--dsw-alias-label-secondary,#686a70);font-size:12px}
+      .feishu-settings .feishu-project-summary button{font-size:12px;padding:4px 8px}
+      .feishu-project-results{max-height:260px;overflow:auto;overscroll-behavior:contain}
+      .feishu-settings .feishu-project-option{display:flex;flex-direction:column;gap:3px;width:100%;border:1px solid transparent;border-radius:6px;padding:9px 10px;text-align:left;white-space:normal;overflow-wrap:anywhere}
+      .feishu-project-option-title{display:flex;justify-content:space-between;gap:10px;width:100%;font-weight:500}.feishu-project-option-title>span{font-size:12px;font-weight:400;flex-shrink:0}
+      .feishu-project-path{font-size:12px;color:var(--dsw-alias-label-secondary,#686a70)}
+      .feishu-settings .feishu-project-option:is(.is-active,[aria-selected="true"]){border-color:var(--dsw-alias-brand-primary,#4d6bfe)}
+      .feishu-settings .feishu-project-option:not(:disabled):hover{background:var(--dsw-alias-bg-layer-2,#f2f4f8)}
+      .feishu-sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
       .feishu-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.feishu-actions input{flex:1;min-width:160px}
       .feishu-muted,.feishu-field small{color:var(--dsw-alias-label-secondary,#686a70)}.feishu-settings .feishu-error{color:var(--dsw-alias-label-error,#ba3030);overflow-wrap:anywhere}.feishu-success{color:#258047}
       .feishu-settings a{color:var(--dsw-alias-brand-primary,#4d6bfe)}

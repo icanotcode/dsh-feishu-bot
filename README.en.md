@@ -118,7 +118,7 @@ The installer links this checkout into the Harness `web` profile and adds the re
 
 ### 3. Choose a connection mode
 
-Enter your App ID, App Secret, the absolute path to an existing dedicated user-workspace root, and an Agent preset. Then choose how to receive events:
+Enter your App ID, App Secret, and Agent preset. In **任务处理**, click **搜索项目**, search by project name or path, and select a project directory. The list contains projects added to Harness and directories already bound to bots; it does not scan the disk. Users remain restricted to their own directories under the selected project’s `.feishu-users/`, without access to existing project files. Then choose how to receive events:
 
 | Item | Developer server (Webhook) | Persistent connection (WebSocket) |
 | --- | --- | --- |
@@ -146,7 +146,11 @@ See the **[Feishu setup guide (Chinese)](docs/setup.md)** for field descriptions
 
 ### Connect multiple bots to one server
 
-Use **当前机器人** at the top of the plugin card to select an application. Choose **添加机器人**, enter a display name and an existing absolute project directory, then save that bot's App ID, App Secret, and event transport. Each bot must use a different Feishu App ID and a distinct project directory. Webhook and WebSocket bots can run together.
+Use **当前机器人** at the top of the plugin card to select an application. Choose **添加机器人**, enter a display name and select a project directory using **搜索项目**, then save that bot's App ID, App Secret, and event transport. Each bot must use a different Feishu App ID and a distinct project directory. Webhook and WebSocket bots can run together.
+
+The project picker works the same way in **任务处理** and **添加机器人**: click **搜索项目**, type a project name or path to filter the dropdown immediately, select a result, then save the configuration or create the bot. It lists Harness’s registered projects and directories already bound to bots, without scanning the disk. Directories assigned to another bot or unavailable on disk cannot be selected. If a project is missing, add it in Harness first, then refresh the list. Selecting a project does not grant access to all of its files: each remote user remains restricted to their own `.feishu-users/<identity-hash>/` directory.
+
+![Searchable project directory picker](assets/settings-project-picker.png)
 
 Once an App ID is bound, it cannot be replaced. Add a new bot for another Feishu application so each application retains its own history. You can update the same application’s App Secret and other credentials after any running task finishes.
 
@@ -187,7 +191,7 @@ A successful credential test confirms application authentication. Saving the req
 | Callback path | The default bot retains `/webhook/feishu`; added bots receive unique subpaths |
 | Agent preset | `standard`; it must already be installed in Harness |
 | Permission preset | `workspace-write`; `read-only` is the only alternative, and full-access presets are rejected |
-| Working directory | A root for separate user subdirectories; select a dedicated empty directory before first use |
+| Project directory | Select from the searchable Harness project dropdown; each user only accesses their own subdirectory under `.feishu-users/` |
 | User access | Controlled through Feishu app availability; provide a name and reply `确认` before starting tasks |
 | Daily context reset | `04:00` in `Asia/Macau`; archives the old session after running work finishes, retaining SQLite history and archived Harness logs |
 | Model | Uses the default Harness model configuration unless specified separately |

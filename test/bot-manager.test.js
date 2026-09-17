@@ -119,6 +119,23 @@ async function fixture(t) {
 }
 const botPath = (id, suffix = '/config') => `/api/feishu-bot/bots/${id}${suffix}`;
 
+test('project directory catalog is authenticated and includes current bot ownership', async t => {
+  const f = await fixture(t);
+  let reads = 0;
+  f.ctx.workspaceRegistry = { list: () => { reads++; return [{ path: f.base.workspacePath, title: 'Harness project' }]; } };
+  const denied = await f.request('/api/feishu-bot/projects', 'GET', undefined, { cookie: '' });
+  assert.equal(denied.status, 403);
+  assert.equal(reads, 0, 'unauthenticated requests do not read local directories');
+  const result = await f.request('/api/feishu-bot/projects');
+  assert.equal(result.status, 200);
+  assert.equal(reads, 1);
+  assert.deepEqual(result.body.projects.map(row => [row.name, row.available, row.botId, row.botName]), [['Harness project', true, 'default', '默认机器人']]);
+  const secondary = await f.add({ name: 'Second project' });
+  const fresh = await f.request('/api/feishu-bot/projects');
+  assert.equal(fresh.body.projects.some(row => row.botId === secondary.id && row.botName === 'Second project'), true);
+  assert.equal((await f.request('/api/feishu-bot/projects', 'POST', {})).status, 405);
+});
+
 test('legacy default preserves configuration, credentials, history, source and callback aliases', async t => {
   const f = await fixture(t);
   const list = await f.request('/api/feishu-bot/bots');

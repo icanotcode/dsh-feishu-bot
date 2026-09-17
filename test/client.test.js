@@ -144,6 +144,8 @@ async function fixture(t, initial = {}, options = {}) {
   dom.card();
   let timerId = 0;
   let saved = { connectionMode: 'webhook', tunnelProvider: 'ngrok', harnessPort: 4321, appId: 'cli_example', configured: { appSecret: true, verificationToken: true }, ...initial };
+  const projectCatalog = options.projects || [{ path: '/srv/customer', name: '客户项目', available: true }];
+  const projectsWarning = options.projectsWarning;
   const bots = [{ id: 'default', name: '默认机器人', enabled: true }, ...(options.bots || [])];
   const configs = new Map(bots.map(bot => [bot.id, { ...saved, appId: `cli_${bot.id}`, ...bot.config }]));
   configs.set('default', saved);
@@ -184,6 +186,7 @@ async function fixture(t, initial = {}, options = {}) {
       requests.push({ url, ...options });
       if (failures.has(url)) throw new Error(failures.get(url));
       if (pauses.has(url)) await pauses.get(url);
+      if (url === '/api/feishu-bot/projects') return { ok: true, status: 200, json: async () => ({ projects: projectCatalog, warning: projectsWarning }) };
       if (url === '/api/feishu-bot/bots') {
         if (options.method === 'POST') {
           const body = JSON.parse(options.body);
@@ -265,7 +268,7 @@ async function fixture(t, initial = {}, options = {}) {
     confirmations: () => confirmations,
     setRuntime: value => { runtime = value; },
     setTunnel: value => { tunnelOverride = value; },
-    fail: (path, message) => { if (message) failures.set(`/api/feishu-bot/${path.startsWith('bots') ? path : `bots/default/${path}`}`, message); else failures.delete(`/api/feishu-bot/${path.startsWith('bots') ? path : `bots/default/${path}`}`); } };
+    fail: (path, message) => { if (message) failures.set(`/api/feishu-bot/${(path === 'projects' || path.startsWith('bots')) ? path : `bots/default/${path}`}`, message); else failures.delete(`/api/feishu-bot/${(path === 'projects' || path.startsWith('bots')) ? path : `bots/default/${path}`}`); } };
 }
 
 test('inventory settings expose transport choice without extra navigation; unsaved selection does not claim runtime switched', async t => {
@@ -563,7 +566,10 @@ test('create, rename and disable preserve configuration access without a delete 
   action(f, '添加机器人').props.onClick();
   f.render();
   f.edit('new-bot-name', '客户项目');
-  f.edit('new-bot-path', '/srv/customer');
+  f.field('new-bot-path').props.onClick();
+  await f.settle();
+  f.nodes().find(node => node.props.role === 'option' && f.text(node).includes('/srv/customer')).props.onClick();
+  f.render();
   f.nodes().find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
   await f.settle();
   assert.equal(f.field('bot').props.value, 'bot-1');
@@ -651,4 +657,98 @@ test('bound App ID is read-only with accurate guidance while unbound apps remain
   fresh.edit('appId', 'cli_new_application');
   await save(fresh);
   assert.equal(JSON.parse(fresh.requests.find(r => r.method === 'POST').body).appId, 'cli_new_application');
+});
+
+
+async function openProjects(f, key = 'workspacePath') {
+  f.field(key).props.onClick();
+  await f.settle();
+}
+function projectOptions(f) { return f.nodes().filter(node => node.props.role === 'option'); }
+function keypress(f, key, event = {}) {
+  let prevented = false;
+  f.field('workspacePath-query').props.onKeyDown({ key, preventDefault() { prevented = true; }, stopPropagation() {}, ...event });
+  f.render();
+  return prevented;
+}
+
+test('project picker filters Harness names and paths without changing saved selection until a result is chosen', async t => {
+  const f = await fixture(t, { workspacePath: '/projects/old' }, { projects: [
+    { path: '/projects/old', name: '原项目', available: true, botId: 'default' },
+    { path: '/projects/Alpha', name: '课程研发', available: true },
+    { path: 'C:\\Projects\\Beta', name: '招生平台', available: true }
+  ] });
+  assert.equal(f.field('workspacePath').props.value, '/projects/old');
+  assert.equal(f.field('workspacePath').props['aria-expanded'], false);
+  await openProjects(f);
+  assert.equal(projectOptions(f).length, 3);
+  f.edit('workspacePath-query', '课程 ALPHA');
+  assert.equal(projectOptions(f).length, 1);
+  assert.equal(f.field('workspacePath').props.value, '/projects/old');
+  projectOptions(f)[0].props.onClick();
+  f.render();
+  assert.equal(f.field('workspacePath').props.value, '/projects/Alpha');
+  assert.equal(f.field('workspacePath-query'), undefined);
+  assert.equal(f.requests.filter(r => r.method === 'POST').length, 0);
+  await save(f);
+  const posted = JSON.parse(f.requests.find(r => r.method === 'POST').body);
+  assert.equal(posted.workspacePath, '/projects/Alpha');
+});
+
+test('project picker skips occupied and missing directories with keyboard and keeps current bot selectable', async t => {
+  const f = await fixture(t, { workspacePath: '/projects/current' }, { projects: [
+    { path: '/projects/other', name: '其他项目', available: true, botId: 'other', botName: '客服' },
+    { path: '/projects/missing', name: '已删除项目', available: false },
+    { path: '/projects/current', name: '当前项目', available: true, botId: 'default' },
+    { path: '/projects/next', name: '下个项目', available: true }
+  ] });
+  await openProjects(f);
+  assert.deepEqual(projectOptions(f).map(node => node.props.disabled), [true, true, false, false]);
+  assert.match(f.text(), /已由「客服」使用/);
+  assert.equal(keypress(f, 'ArrowDown'), true);
+  assert.match(f.field('workspacePath-query').props['aria-activedescendant'], /-2$/);
+  keypress(f, 'ArrowDown');
+  assert.match(f.field('workspacePath-query').props['aria-activedescendant'], /-3$/);
+  keypress(f, 'Enter', { isComposing: true });
+  assert.equal(f.field('workspacePath').props.value, '/projects/current');
+  keypress(f, 'Enter');
+  assert.equal(f.field('workspacePath').props.value, '/projects/next');
+  await openProjects(f);
+  keypress(f, 'Home');
+  keypress(f, 'Escape');
+  assert.equal(f.field('workspacePath').props.value, '/projects/next');
+  assert.equal(f.field('workspacePath').props['aria-expanded'], false);
+});
+
+test('project picker preserves selection on no matches and recovers from a failed list request', async t => {
+  const f = await fixture(t, { workspacePath: '/projects/current' }, { projects: [] });
+  f.fail('projects', '暂时无法读取项目');
+  await openProjects(f);
+  assert.match(f.text(), /暂时无法读取项目/);
+  assert.equal(f.field('workspacePath').props.value, '/projects/current');
+  f.fail('projects', null);
+  action(f, '重试').props.onClick();
+  await f.settle();
+  assert.match(f.text(), /请先在 Harness 中添加项目/);
+  assert.equal(projectOptions(f).length, 0);
+  keypress(f, 'ArrowDown'); keypress(f, 'Enter');
+  assert.equal(f.requests.filter(r => r.method === 'POST').length, 0);
+});
+
+test('project picker reports unmatched searches and stale requests cannot switch another bot project', async t => {
+  const f = await fixture(t, { workspacePath: '/projects/a' }, { projects: [{ path: '/projects/a', name: '甲', available: true }],
+    bots: [{ id: 'b', name: '乙', enabled: true, config: { workspacePath: '/projects/b' } }] });
+  await openProjects(f);
+  f.edit('workspacePath-query', '没有这个项目');
+  assert.match(f.text(), /没有匹配的项目/);
+  assert.equal(projectOptions(f).length, 0);
+  keypress(f, 'Escape');
+  const resume = f.pause('projects');
+  await openProjects(f);
+  assert.match(f.text(), /正在读取 Harness 项目/);
+  f.edit('bot', 'b'); await f.settle();
+  resume(); await f.settle();
+  assert.equal(f.field('workspacePath').props.value, '/projects/b');
+  assert.equal(f.field('workspacePath').props['aria-expanded'], false);
+  assert.equal(f.requests.filter(r => r.method === 'POST').length, 0);
 });
