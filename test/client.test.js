@@ -128,8 +128,9 @@ test('inventory plugin disposal disconnects observation and removes mounted root
   assert.equal(f.roots[0].unmounts, 1);
 });
 
-async function fixture(t, initial = {}) {
-  const hooks = [];
+async function fixture(t, initial = {}, options = {}) {
+  let hooks = [];
+  const instances = new Map();
   const effects = [];
   const timers = new Map();
   const requests = [];
@@ -143,8 +144,14 @@ async function fixture(t, initial = {}) {
   dom.card();
   let timerId = 0;
   let saved = { connectionMode: 'webhook', tunnelProvider: 'ngrok', harnessPort: 4321, appId: 'cli_example', configured: { appSecret: true, verificationToken: true }, ...initial };
+  const bots = [{ id: 'default', name: '默认机器人', enabled: true }, ...(options.bots || [])];
+  const configs = new Map(bots.map(bot => [bot.id, { ...saved, appId: `cli_${bot.id}`, ...bot.config }]));
+  configs.set('default', saved);
+  let confirmation = true;
+  let confirmations = 0;
   let tunnelOverride;
   const failures = new Map();
+  const pauses = new Map();
   let runtime = { mode: saved.connectionMode, state: saved.connectionMode === 'webhook' ? 'listening' : 'connected', message: '' };
   const React = {
     Fragment: 'fragment',
@@ -153,18 +160,20 @@ async function fixture(t, initial = {}) {
     useState(value) {
       const index = cursor++;
       if (!(index in hooks)) hooks[index] = value;
-      return [hooks[index], value => { hooks[index] = typeof value === 'function' ? value(hooks[index]) : value; }];
+      const state = hooks;
+      return [state[index], value => { state[index] = typeof value === 'function' ? value(state[index]) : value; }];
     },
     useEffect(callback, deps) {
       const index = cursor++;
       const previous = hooks[index];
       if (!previous || deps.some((value, i) => value !== previous.deps[i])) {
-        effects.push(() => { previous?.cleanup?.(); hooks[index] = { deps, cleanup: callback() }; });
+        const state = hooks;
+        effects.push(() => { previous?.cleanup?.(); state[index] = { deps, cleanup: callback() }; });
       }
     }
   };
   vm.runInNewContext(source, {
-    window: { __ModuleLoader__: { load: definition => { plugin = definition.factory(name => {
+    window: { confirm: () => { confirmations++; return confirmation; }, __ModuleLoader__: { load: definition => { plugin = definition.factory(name => {
       if (name === 'react') return React;
       if (name === 'react-dom/client') return dom.reactDOM;
       throw new Error(`Unexpected client dependency: ${name}`);
@@ -174,13 +183,36 @@ async function fixture(t, initial = {}) {
     fetch: async (url, options) => {
       requests.push({ url, ...options });
       if (failures.has(url)) throw new Error(failures.get(url));
-      if (url.endsWith('/config') && options.method === 'POST') {
-        saved = { ...saved, ...JSON.parse(options.body) };
-        runtime = { mode: saved.connectionMode, state: saved.connectionMode === 'webhook' ? 'listening' : 'connecting', message: '' };
+      if (pauses.has(url)) await pauses.get(url);
+      if (url === '/api/feishu-bot/bots') {
+        if (options.method === 'POST') {
+          const body = JSON.parse(options.body);
+          const bot = { id: `bot-${bots.length}`, ...body, enabled: true };
+          bots.push(bot);
+          configs.set(bot.id, { ...saved, appId: '', workspacePath: body.workspacePath, connectionMode: 'webhook' });
+          return { ok: true, status: 200, json: async () => ({ success: true, bot }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ bots, defaultBotId: 'default' }) };
       }
-      const data = url.endsWith('/config') ? saved
-        : url.endsWith('/connection/status') ? runtime
-          : url.endsWith('/webhook-url') ? { url: saved.connectionMode === 'websocket' ? null : saved.publicBaseUrl ? `${saved.publicBaseUrl}/webhook/feishu` : saved.tunnelProvider === 'ngrok' ? 'https://example.ngrok.app/webhook/feishu' : null }
+      const botId = url.match(/\/bots\/([^/]+)\//)?.[1] || 'default';
+      let config = configs.get(botId);
+      const bot = bots.find(item => item.id === botId);
+      if (url.endsWith('/meta')) {
+        Object.assign(bot, JSON.parse(options.body));
+        return { ok: true, status: 200, json: async () => ({ success: true, bot }) };
+      }
+      if (url.endsWith('/config') && options.method === 'POST') {
+        config = { ...config, ...JSON.parse(options.body) };
+        configs.set(botId, config);
+        if (botId === 'default') {
+          saved = config;
+          runtime = { mode: saved.connectionMode, state: saved.connectionMode === 'webhook' ? 'listening' : 'connecting', message: '' };
+        }
+      }
+      const baseUrl = saved.publicBaseUrl || (saved.tunnelProvider === 'ngrok' ? 'https://example.ngrok.app' : null);
+      const data = url.endsWith('/config') ? { ...config, sharedTunnel: botId !== 'default' }
+        : url.endsWith('/connection/status') ? botId === 'default' ? runtime : { mode: config.connectionMode, state: bot.enabled ? 'listening' : 'disabled' }
+          : url.endsWith('/webhook-url') ? { url: config.connectionMode === 'websocket' || !baseUrl ? null : `${baseUrl}/webhook/feishu${botId === 'default' ? '' : `/${botId}`}` }
             : tunnelOverride || { provider: saved.tunnelProvider, state: saved.connectionMode === 'websocket' ? 'not_required' : saved.tunnelProvider === 'ngrok' ? 'detected' : saved.publicBaseUrl ? 'configured' : 'unconfigured', running: saved.tunnelProvider === 'ngrok' ? true : null, url: saved.publicBaseUrl || null, port: 4321 };
       return { ok: true, status: 200, json: async () => data };
     },
@@ -191,22 +223,49 @@ async function fixture(t, initial = {}) {
     inject: (_name, register) => register(),
     register: (metadata, view) => { registrations.push(metadata); component = view; }
   } });
-  function render() { cursor = 0; tree = component(); effects.splice(0).forEach(effect => effect()); return tree; }
-  async function settle() { await new Promise(resolve => setImmediate(resolve)); render(); }
+  function render() {
+    const seen = new Set();
+    function expand(node, path = 'root') {
+      if (!node || typeof node !== 'object') return node;
+      if (typeof node.type === 'function') {
+        const key = `${path}:${node.type.name}:${node.props.key || ''}`;
+        seen.add(key);
+        if (!instances.has(key)) instances.set(key, []);
+        hooks = instances.get(key); cursor = 0;
+        return expand(node.type(node.props), key);
+      }
+      return { ...node, children: node.children.map((child, index) => expand(child, `${path}/${index}`)) };
+    }
+    tree = expand({ type: component, props: {}, children: [] });
+    for (const [key, state] of instances) if (!seen.has(key)) {
+      state.forEach(hook => hook?.cleanup?.()); instances.delete(key);
+    }
+    effects.splice(0).forEach(effect => effect());
+    return tree;
+  }
+  async function settle() { for (let i = 0; i < 5; i++) { await new Promise(resolve => setImmediate(resolve)); render(); } }
   function nodes(node = tree) {
     return typeof node === 'object' ? [node, ...node.children.flatMap(nodes)] : [];
   }
   function text(node = tree) { return typeof node === 'object' ? node.children.map(text).join(' ') : String(node); }
   function field(key) { return nodes().find(node => node.props.id === `feishu-test-${key}`); }
   function edit(key, value) { field(key).props.onChange({ target: { value } }); render(); }
-  function dispose() { hooks.forEach(hook => hook?.cleanup?.()); disposers.splice(0).reverse().forEach(cleanup => cleanup?.()); }
+  function dispose() { for (const state of instances.values()) state.forEach(hook => hook?.cleanup?.()); disposers.splice(0).reverse().forEach(cleanup => cleanup?.()); }
   t.after(dispose);
   render();
   await settle();
   return { render, settle, nodes, text, field, edit, dispose, timers, requests, registrations,
+    pause(path) {
+      let resume;
+      const url = `/api/feishu-bot/${path}`;
+      pauses.set(url, new Promise(resolve => { resume = () => { pauses.delete(url); resolve(); }; }));
+      return resume;
+    },
+    setConfirmation: value => { confirmation = value; },
+    confirmations: () => confirmations,
     setRuntime: value => { runtime = value; },
     setTunnel: value => { tunnelOverride = value; },
-    fail: (path, message) => { if (message) failures.set(`/api/feishu-bot/${path}`, message); else failures.delete(`/api/feishu-bot/${path}`); } };
+    fail: (path, message) => { if (message) failures.set(`/api/feishu-bot/${path.startsWith('bots') ? path : `bots/default/${path}`}`, message); else failures.delete(`/api/feishu-bot/${path.startsWith('bots') ? path : `bots/default/${path}`}`); } };
 }
 
 test('inventory settings expose transport choice without extra navigation; unsaved selection does not claim runtime switched', async t => {
@@ -442,4 +501,154 @@ test('launch errors are visible and custom or websocket transports have no proce
   assert.equal(action(f, '启动当前端口的隧道'), undefined);
   f.edit('connectionMode', 'websocket');
   assert.equal(action(f, '停止托管隧道'), undefined);
+});
+
+test('bot selector remounts independent credentials and callback while secondary bots share read-only tunnel status', async t => {
+  const f = await fixture(t, {}, { bots: [{ id: 'project-b', name: '项目 B', enabled: true,
+    config: { appId: 'cli_project_b', workspacePath: '/projects/b' } }] });
+  assert.equal(f.field('bot').props.value, 'default');
+  assert.match(f.text(), /共享隧道设置/);
+  f.edit('bot', 'project-b');
+  await f.settle();
+  assert.equal(f.field('appId').props.value, 'cli_project_b');
+  assert.equal(f.field('workspacePath').props.value, '/projects/b');
+  assert.equal(f.field('webhook').props.value, 'https://example.ngrok.app/webhook/feishu/project-b');
+  assert.equal(f.field('tunnelProvider'), undefined);
+  assert.equal(f.field('publicBaseUrl'), undefined);
+  assert.equal(f.field('tunnelAutoRestart'), undefined);
+  assert.equal(action(f, '启动当前端口的隧道'), undefined);
+  assert.match(f.text(), /共享默认机器人的公网隧道/);
+  assert.equal(f.timers.size, 1, 'switching bot disposes the previous poller');
+  f.edit('appSecret', 'new-project-secret');
+  await save(f);
+  const post = f.requests.find(r => r.method === 'POST');
+  assert.equal(post.url, '/api/feishu-bot/bots/project-b/config');
+  const body = JSON.parse(post.body);
+  assert.equal(body.appSecret, 'new-project-secret');
+  assert.equal(body.workspacePath, '/projects/b');
+  assert.equal(body.connectionMode, 'webhook');
+  assert.equal('ngrokAuthtoken' in body, false);
+  assert.equal('publicBaseUrl' in body, false);
+  assert.equal('tunnelAutoRestart' in body, false);
+  assert.equal('source' in body, false);
+  assert.equal('path' in body, false);
+  f.edit('bot', 'default');
+  await f.settle();
+  assert.equal(f.field('appId').props.value, 'cli_example');
+  assert.equal(f.field('appSecret').props.value, '');
+  assert.ok(f.field('tunnelProvider'));
+  assert.equal(f.requests.every(r => r.url === '/api/feishu-bot/bots' || r.url.startsWith('/api/feishu-bot/bots/')), true);
+});
+
+test('switching bots requires a cancellable confirmation when credentials have unsaved edits', async t => {
+  const f = await fixture(t, {}, { bots: [{ id: 'project-b', name: '项目 B', enabled: true }] });
+  f.edit('appSecret', 'draft-secret');
+  await f.settle();
+  f.setConfirmation(false);
+  f.edit('bot', 'project-b');
+  await f.settle();
+  assert.equal(f.confirmations(), 1);
+  assert.equal(f.field('bot').props.value, 'default');
+  assert.equal(f.field('appSecret').props.value, 'draft-secret');
+  f.setConfirmation(true);
+  f.edit('bot', 'project-b');
+  await f.settle();
+  assert.equal(f.field('bot').props.value, 'project-b');
+  assert.equal(f.field('appSecret').props.value, '');
+  assert.equal(f.requests.some(r => r.method === 'POST'), false, 'discarded credentials must never be sent');
+});
+
+test('create, rename and disable preserve configuration access without a delete action', async t => {
+  const f = await fixture(t);
+  action(f, '添加机器人').props.onClick();
+  f.render();
+  f.edit('new-bot-name', '客户项目');
+  f.edit('new-bot-path', '/srv/customer');
+  f.nodes().find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+  await f.settle();
+  assert.equal(f.field('bot').props.value, 'bot-1');
+  assert.equal(f.field('workspacePath').props.value, '/srv/customer');
+  assert.deepEqual(JSON.parse(f.requests.find(r => r.method === 'POST').body), { name: '客户项目', workspacePath: '/srv/customer' });
+  f.edit('bot-name', '客户服务');
+  action(f, '重命名').props.onClick();
+  await f.settle();
+  assert.equal(f.field('bot-name').props.value, '客户服务');
+  action(f, '已启用 · 点击停用').props.onClick();
+  await f.settle();
+  assert.ok(action(f, '已停用 · 点击启用'));
+  assert.match(f.text(), /配置和历史数据继续保留/);
+  assert.doesNotMatch(f.text(), /删除机器人/);
+  f.edit('appId', 'cli_disabled_config');
+  await save(f);
+  assert.equal(f.field('appId').props.value, 'cli_disabled_config');
+  assert.ok(f.requests.find(r => r.url === '/api/feishu-bot/bots/bot-1/meta' && JSON.parse(r.body).enabled === false));
+});
+
+test('websocket default bot still manages a tunnel required by another bot without showing its own webhook', async t => {
+  const f = await fixture(t, { connectionMode: 'websocket', serverTunnelRequired: true });
+  assert.equal(f.field('webhook'), undefined);
+  assert.ok(f.field('tunnelProvider'));
+  assert.ok(f.field('tunnelAutoRestart'));
+  assert.equal(action(f, '启动当前端口的隧道').props.disabled, false);
+  assert.match(f.text(), /服务器共享公网隧道/);
+  assert.doesNotMatch(f.text(), /在飞书应用的「事件订阅」中填写公网可访问的请求地址/);
+  action(f, '启动当前端口的隧道').props.onClick();
+  await f.settle();
+  assert.ok(f.requests.find(r => r.url === '/api/feishu-bot/bots/default/tunnel/start'));
+});
+
+test('secondary websocket bot hides tunnel and callback controls entirely', async t => {
+  const f = await fixture(t, {}, { bots: [{ id: 'project-b', name: '项目 B', enabled: true,
+    config: { connectionMode: 'websocket', serverTunnelRequired: true } }] });
+  f.edit('bot', 'project-b');
+  await f.settle();
+  assert.equal(f.field('webhook'), undefined);
+  assert.equal(f.field('tunnelProvider'), undefined);
+  assert.equal(f.field('tunnelAutoRestart'), undefined);
+});
+
+test('late configuration and status responses from an unmounted bot cannot overwrite the newly selected bot', async t => {
+  const f = await fixture(t, {}, { bots: [{ id: 'project-b', name: '项目 B', enabled: true,
+    config: { appId: 'cli_project_b', workspacePath: '/projects/b' } }] });
+  const resumeConfig = f.pause('bots/project-b/config');
+  const resumeWebhook = f.pause('bots/project-b/webhook-url');
+  f.edit('bot', 'project-b');
+  await f.settle();
+  assert.match(f.text(), /正在读取配置/);
+  f.edit('bot', 'default');
+  await f.settle();
+  f.edit('appId', 'cli_default_draft');
+  resumeConfig(); resumeWebhook();
+  await f.settle();
+  assert.equal(f.field('bot').props.value, 'default');
+  assert.equal(f.field('appId').props.value, 'cli_default_draft');
+  assert.equal(f.field('webhook').props.value, 'https://example.ngrok.app/webhook/feishu');
+  assert.equal(f.timers.size, 1, 'completed stale requests must not restart an old poller');
+});
+
+test('busy-bot disable rejection keeps enabled state and configuration intact', async t => {
+  const f = await fixture(t);
+  f.fail('bots/default/meta', '机器人正在处理任务，请完成后再停用');
+  action(f, '已启用 · 点击停用').props.onClick();
+  await f.settle();
+  assert.match(f.text(), /机器人正在处理任务，请完成后再停用/);
+  assert.equal(action(f, '已启用 · 点击停用').props['aria-checked'], true);
+  assert.equal(action(f, '已停用 · 点击启用'), undefined);
+  assert.equal(f.field('appId').props.value, 'cli_example');
+});
+
+test('bound App ID is read-only with accurate guidance while unbound apps remain editable', async t => {
+  const bound = await fixture(t, { configured: { appId: true, appSecret: true } });
+  assert.equal(bound.field('appId').props.readOnly, true);
+  assert.equal(bound.field('appSecret').props.readOnly, false);
+  assert.match(bound.text(), /已绑定此应用；切换应用请新增机器人/);
+  assert.match(bound.text(), /已保存凭证；填写新值可替换/);
+  await save(bound);
+  assert.equal(JSON.parse(bound.requests.find(r => r.method === 'POST').body).appId, 'cli_example');
+  const fresh = await fixture(t, { appId: '', configured: {} });
+  assert.equal(fresh.field('appId').props.readOnly, false);
+  assert.doesNotMatch(fresh.text(), /已绑定此应用/);
+  fresh.edit('appId', 'cli_new_application');
+  await save(fresh);
+  assert.equal(JSON.parse(fresh.requests.find(r => r.method === 'POST').body).appId, 'cli_new_application');
 });

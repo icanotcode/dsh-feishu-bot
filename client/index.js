@@ -80,6 +80,106 @@ window.__ModuleLoader__.load({
 
     function FeishuSettings() {
       const prefix = useId();
+      const [bots, setBots] = useState([]);
+      const [selectedId, setSelectedId] = useState('');
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [draft, setDraft] = useState({ dirty: false, busy: false });
+      const [adding, setAdding] = useState(false);
+      const [newName, setNewName] = useState('');
+      const [newPath, setNewPath] = useState('');
+      const [rename, setRename] = useState('');
+      const [reload, setReload] = useState(0);
+      useEffect(() => {
+        let active = true;
+        setLoading(true);
+        request('bots').then(data => {
+          if (!active) return;
+          setBots(data.bots);
+          const id = data.bots.some(bot => bot.id === selectedId) ? selectedId : data.defaultBotId;
+          setSelectedId(id);
+          setRename(data.bots.find(bot => bot.id === id)?.name || '');
+          setError('');
+        }).catch(cause => { if (active) setError(cause.message); })
+          .finally(() => { if (active) setLoading(false); });
+        return () => { active = false; };
+      }, [reload]);
+      const selected = bots.find(bot => bot.id === selectedId);
+      const blocked = busy || draft.busy;
+      function discardDraft() {
+        return !draft.dirty || window.confirm('当前机器人有未保存的配置，是否放弃这些修改？');
+      }
+      function selectBot(id) {
+        if (blocked || id === selectedId || !discardDraft()) return;
+        setSelectedId(id);
+        setRename(bots.find(bot => bot.id === id)?.name || '');
+        setDraft({ dirty: false, busy: false });
+        setError('');
+      }
+      async function updateMeta(patch) {
+        setBusy(true); setError('');
+        try {
+          const data = await request(`bots/${encodeURIComponent(selectedId)}/meta`, patch);
+          setBots(previous => previous.map(bot => bot.id === selectedId ? { ...bot, ...data.bot } : bot));
+          setRename(data.bot.name);
+        } catch (cause) { setError(cause.message); }
+        finally { setBusy(false); }
+      }
+      return h('div', { className: 'feishu-settings' },
+        h('h2', null, '飞书机器人'),
+        h('p', { className: 'feishu-muted' }, '一个 Harness 可连接多个飞书机器人，每个机器人使用独立的项目目录、凭据、用户会话和历史数据库。'),
+        loading ? h('p', { role: 'status' }, '正在读取机器人列表…') : h('section', null,
+          h('div', { className: 'feishu-field' },
+            h('label', { htmlFor: `${prefix}-bot` }, '当前机器人'),
+            h('select', { id: `${prefix}-bot`, value: selectedId, disabled: blocked,
+              onChange: event => selectBot(event.target.value) }, bots.map(bot => h('option', { key: bot.id, value: bot.id }, `${bot.name}${bot.id === 'default' ? '（共享隧道设置）' : ''}${bot.enabled ? '' : '（已停用）'}`)))),
+          selected && h(React.Fragment, null,
+            h('div', { className: 'feishu-field' },
+              h('label', { htmlFor: `${prefix}-bot-name` }, '机器人名称'),
+              h('input', { id: `${prefix}-bot-name`, value: rename, disabled: blocked, maxLength: 80,
+                onChange: event => setRename(event.target.value) })),
+            h('div', { className: 'feishu-actions' },
+              h('button', { type: 'button', disabled: blocked || !rename.trim() || rename.trim() === selected.name,
+                onClick: () => updateMeta({ name: rename.trim() }) }, '重命名'),
+              h('button', { type: 'button', role: 'switch', 'aria-checked': selected.enabled,
+                'aria-label': '启用当前机器人', disabled: blocked,
+                onClick: () => updateMeta({ enabled: !selected.enabled }) }, selected.enabled ? '已启用 · 点击停用' : '已停用 · 点击启用')),
+            !selected.enabled && h('p', { role: 'status', className: 'feishu-muted' }, '此机器人已停用，不接收消息或执行新任务；配置和历史数据继续保留。')),
+          h('div', { className: 'feishu-actions' }, h('button', { type: 'button', disabled: blocked,
+            onClick: () => { setAdding(!adding); setError(''); } }, adding ? '取消添加' : '添加机器人')),
+          adding && h('form', { onSubmit: async event => {
+            event.preventDefault();
+            if (blocked || !newName.trim() || !newPath.trim() || !discardDraft()) return;
+            setBusy(true); setError('');
+            try {
+              const data = await request('bots', { name: newName.trim(), workspacePath: newPath.trim() });
+              setBots(previous => [...previous, data.bot]);
+              setSelectedId(data.bot.id); setRename(data.bot.name);
+              setDraft({ dirty: false, busy: false });
+              setAdding(false); setNewName(''); setNewPath('');
+            } catch (cause) { setError(cause.message); }
+            finally { setBusy(false); }
+          } },
+            h('div', { className: 'feishu-field' },
+              h('label', { htmlFor: `${prefix}-new-bot-name` }, '新机器人名称'),
+              h('input', { id: `${prefix}-new-bot-name`, value: newName, required: true, maxLength: 80, disabled: blocked,
+                onChange: event => setNewName(event.target.value) })),
+            h('div', { className: 'feishu-field' },
+              h('label', { htmlFor: `${prefix}-new-bot-path` }, '新机器人项目目录'),
+              h('input', { id: `${prefix}-new-bot-path`, value: newPath, required: true, disabled: blocked,
+                onChange: event => setNewPath(event.target.value) }),
+              h('small', null, '填写本机已存在的绝对目录；请为不同机器人选择独立目录。')),
+            h('button', { type: 'submit', disabled: blocked || !newName.trim() || !newPath.trim(), className: 'feishu-primary' }, busy ? '添加中…' : '创建机器人'))),
+        error && h('div', { role: 'alert', className: 'feishu-error' }, error,
+          !bots.length && h('button', { type: 'button', onClick: () => setReload(reload + 1) }, '重新加载机器人列表')),
+        !loading && selected && h(BotSettings, { key: selected.id, botId: selected.id, onDraftState: setDraft }));
+    }
+
+    function BotSettings({ botId, onDraftState }) {
+      const botRequest = (path, body) => request(`bots/${encodeURIComponent(botId)}/${path}`, body);
+      const tunnelRequest = (path, body) => request(`bots/default/${path}`, body);
+      const prefix = useId();
       const [config, setConfig] = useState(defaults);
       const [loading, setLoading] = useState(true);
       const [loadError, setLoadError] = useState('');
@@ -96,9 +196,13 @@ window.__ModuleLoader__.load({
       const [reload, setReload] = useState(0);
       const [connected, setConnected] = useState(false);
       const [secretFlags, setSecretFlags] = useState({});
+      const [sharedTunnel, setSharedTunnel] = useState(botId !== 'default');
+      const dirty = Object.keys(defaults).some(key => config[key] !== savedConfig[key]);
+      useEffect(() => { onDraftState({ dirty, busy: Boolean(busy) }); }, [dirty, busy]);
 
       function applyConfig(data) {
         const value = data.config || data;
+        setSharedTunnel(data.sharedTunnel ?? value.sharedTunnel ?? botId !== 'default');
         const safe = { ...defaults, ...value };
         secrets.forEach(key => { safe[key] = ''; });
         setConfig(safe);
@@ -112,7 +216,7 @@ window.__ModuleLoader__.load({
         let active = true;
         setLoading(true);
         setLoadError('');
-        request('config').then(data => {
+        botRequest('config').then(data => {
           if (active) applyConfig(data);
         }).catch(error => { if (active) setLoadError(error.message); })
           .finally(() => { if (active) setLoading(false); });
@@ -120,7 +224,7 @@ window.__ModuleLoader__.load({
       }, [reload]);
 
       async function refreshStatus(isActive = () => true) {
-        const results = await Promise.allSettled([request('webhook-url'), request('tunnel/status'), request('connection/status')]);
+        const results = await Promise.allSettled([botRequest('webhook-url'), tunnelRequest('tunnel/status'), botRequest('connection/status')]);
         if (!isActive()) return;
         if (results[0].status === 'fulfilled') setWebhook(results[0].value.url || '');
         if (results[1].status === 'fulfilled') setTunnel(results[1].value);
@@ -145,7 +249,7 @@ window.__ModuleLoader__.load({
       function payload() {
         // Omit empty secret fields: the server retains previously saved credentials.
         return Object.fromEntries(Object.keys(defaults)
-          .filter(key => !secrets.includes(key) || config[key])
+          .filter(key => (!sharedTunnel || key === 'connectionMode' || !tunnelFields.includes(key)) && (!secrets.includes(key) || config[key]))
           .map(key => [key, config[key]]));
       }
       async function run(action, task) {
@@ -170,12 +274,12 @@ window.__ModuleLoader__.load({
           h('label', { htmlFor: id }, title),
           options.choices
             ? h('select', shared, options.choices.map(([value, label]) => h('option', { key: value, value }, label)))
-            : h('input', { ...shared, type: options.numeric ? 'number' : secrets.includes(key) ? 'password' : 'text',
+            : h('input', { ...shared, readOnly: key === 'appId' && Boolean(secretFlags.appId), type: options.numeric ? 'number' : secrets.includes(key) ? 'password' : 'text',
               ...(options.numeric ? { min: 0, max: 23, step: 1 } : {}),
               autoComplete: secrets.includes(key) ? 'new-password' : 'off',
               placeholder: options.placeholder || (secrets.includes(key) ? '留空保留已保存的值' : '') }),
           options.hint && h('small', null, options.hint),
-          secretFlags[key] && h('small', null, '已保存凭证；填写新值可替换。'));
+          secretFlags[key] && h('small', null, key === 'appId' ? '已绑定此应用；切换应用请新增机器人。' : '已保存凭证；填写新值可替换。'));
       }
       function button(label, onClick, action, primary = false) {
         return h('button', { type: 'button', disabled: Boolean(busy), onClick,
@@ -199,16 +303,15 @@ window.__ModuleLoader__.load({
       };
 
       return h('div', { className: 'feishu-settings' },
-        h('h2', null, '飞书机器人'),
-        h('p', { className: 'feishu-muted' }, '连接飞书企业自建应用，让收到的消息交给 Harness 处理。'),
+
         loading ? h('p', { role: 'status' }, '正在读取配置…') : loadError
           ? h('div', { role: 'alert' }, h('p', null, loadError), button('重新加载', () => setReload(reload + 1), 'reload'))
           : h(React.Fragment, null,
             h('form', { onSubmit: event => {
               event.preventDefault();
               run('save', async () => {
-                await request('config', payload());
-                applyConfig(await request('config'));
+                await botRequest('config', payload());
+                applyConfig(await botRequest('config'));
                 await refreshStatus();
                 setNotice({ text: '配置已保存。' });
               });
@@ -237,7 +340,7 @@ window.__ModuleLoader__.load({
                 h('div', { className: 'feishu-actions' },
                   button('测试连接', () => run('test', async () => {
                     setConnected(false);
-                    await request('test', payload());
+                    await botRequest('test', payload());
                     setConnected(true);
                     setNotice({ text: '飞书凭证验证成功。修改后的配置仍需保存。' });
                   }), 'test'),
@@ -245,7 +348,7 @@ window.__ModuleLoader__.load({
               h('section', null,
                 h('h3', null, '任务处理'),
                 h('p', { className: 'feishu-muted' }, '处理任务时会给原消息添加 Typing（敲键盘）表情，结束后移除。需要应用权限 im:message.reactions:write_only；请在飞书开放平台开通并发布生效。缺少权限时仍会处理消息，但无法显示状态表情。'),
-                field('workspacePath', '用户工作目录根路径', { placeholder: '/path/to/workspaces', hint: '必须是已存在的绝对路径。插件在此为每位用户创建独立子目录；请使用专门的空目录。' }),
+                field('workspacePath', '项目目录（用户工作目录根路径）', { placeholder: '/path/to/workspaces', hint: '必须是已存在的绝对路径。插件在此为每位用户创建独立子目录；请使用专门的空目录。' }),
                 field('agentPreset', 'Agent 预设', { hint: '填写当前 Harness 已安装的预设名称，例如 standard。' }),
                 field('permissionPreset', '权限预设', { choices: [
                   ['read-only', '只读'], ['workspace-write', '工作区写入']
@@ -259,11 +362,14 @@ window.__ModuleLoader__.load({
                 h('p', { className: 'feishu-muted' }, '同一用户在同一聊天中默认延续当前会话，发送 /new 新开会话；不同用户、不同群聊的上下文分开，历史数据库仅供所属用户查询和管理。'),
                 field('dailyResetHour', '每日上下文切换时间（小时）', { numeric: true, hint: '默认凌晨 4 点。正在执行的任务完成后再切换，历史记录继续保留。' }),
                 field('dailyResetTimezone', '每日上下文切换时区', { placeholder: 'Asia/Macau', hint: '使用 IANA 时区名称，例如 Asia/Macau。/new 和每日切换只重置当前上下文，不删除历史；提及旧内容时可从个人历史数据库查找。' })),
-              config.connectionMode === 'webhook' && h('section', null,
-                h('h3', null, 'Webhook 与公网地址'),
+              (config.connectionMode === 'webhook' || (!sharedTunnel && config.serverTunnelRequired)) && h('section', null,
+                h('h3', null, config.connectionMode === 'webhook' ? 'Webhook 与公网地址' : '服务器共享公网隧道'),
                 h('label', { htmlFor: `${prefix}-harness-port` }, '当前 Harness 监听端口'),
                 h('input', { id: `${prefix}-harness-port`, readOnly: true, value: config.harnessPort || '', placeholder: '等待获取实际端口' }),
                 h('p', { className: 'feishu-muted' }, '端口由 Harness 管理，插件自动读取。需要更换时，停止原实例，再用 dsh web --port 新端口 启动；插件启动隧道时自动使用当前端口。保存插件配置不会更改监听端口。'),
+                sharedTunnel && h('p', { className: 'feishu-muted' }, '此机器人共享默认机器人的公网隧道。请切换到默认机器人管理隧道；每个机器人的 Webhook 地址不同，请分别填写到对应飞书应用。'),
+                sharedTunnel && h('p', { className: 'feishu-muted' }, '如果 ngrok、Cloudflare 或反向代理策略只放行了默认回调，还需放行此机器人的 POST 回调路径；管理页面继续保留原有访问保护。'),
+                !sharedTunnel && h(React.Fragment, null,
                 field('tunnelProvider', '公网接入方式', { choices: [
                   ['ngrok', 'ngrok'], ['cloudflare', 'Cloudflare Tunnel'], ['custom', '自定义公网地址 / 反向代理']
                 ], hint: '选择后保存生效。ngrok 和 Cloudflare 支持一键启动与自动重启；自定义接入由你自行维护。' }),
@@ -301,6 +407,8 @@ window.__ModuleLoader__.load({
                   h('small', { id: `${prefix}-tunnelAutoRestart-hint` }, '保存后生效：开启时缺少隧道会自动启动，异常退出后自动重试；关闭仅停止自动重试，不停止已运行进程。守护随 Harness 运行，Harness 退出后不会继续守护。'),
                   h('small', null, `已保存的守护设置：${savedConfig.tunnelAutoRestart ? '开启' : '关闭'}。${config.tunnelAutoRestart !== savedConfig.tunnelAutoRestart ? '开关修改尚未保存。' : ''}`),
                   h('small', null, 'Linux、Windows、macOS 均需先安装对应的 ngrok 或 cloudflared；支持 PATH 和自定义程序路径，Windows 可使用 .exe，无需 Bash。')),
+                ),
+                config.connectionMode === 'webhook' && h(React.Fragment, null,
                 h('label', { htmlFor: `${prefix}-webhook` }, '已保存配置的 Webhook 地址'),
                 h('div', { className: 'feishu-actions' },
                   h('input', { id: `${prefix}-webhook`, readOnly: true, value: webhook, placeholder: '配置公网地址后显示' }),
@@ -309,29 +417,30 @@ window.__ModuleLoader__.load({
                     setNotice({ text: 'Webhook 地址已复制。' });
                   }) }, '复制')),
                 h('p', { className: 'feishu-muted' }, '在飞书应用的「事件订阅」中填写公网可访问的请求地址，并添加 im.message.receive_v1 事件。'),
+                ),
                 h('p', { role: 'status' }, tunnel
                   ? `已保存配置的公网状态（${providerNames[tunnel.provider] || tunnel.provider}）：${tunnelStateNames[tunnel.state] || tunnel.state || '状态未知'}`
                   : '尚未取得公网接入状态'),
                 tunnel?.message && h('p', { className: 'feishu-muted' }, tunnel.message),
                 statusError && h('p', { role: 'alert', className: 'feishu-error' }, statusError),
-                config.tunnelProvider === 'ngrok' && h('div', { className: 'feishu-muted' },
+                !sharedTunnel && config.tunnelProvider === 'ngrok' && h('div', { className: 'feishu-muted' },
                   h('p', null, '也可在本机手动启动 ngrok；插件会检测指向当前 Harness 端口的已有隧道。手动命令示例（按需保留 --traffic-policy-file）：'),
                   h('code', null, Number.isInteger(config.harnessPort) && config.harnessPort > 0
                     ? `ngrok http ${config.harnessPort} --url https://YOUR-NGROK-DOMAIN` : '请先刷新页面以获取当前 Harness 端口'),
                   h('p', null, '飞书 POST 回调不能完成浏览器登录。入口策略需要允许它到达 /webhook/feishu，由插件校验飞书凭据；管理页面保留访问保护。')),
-                tunnel?.paused && h('p', { role: 'status', className: 'feishu-muted' }, '守护已暂停；点击启动，或关闭守护并保存后重新开启并保存，即可恢复。'),
-                tunnel?.managed && h('p', { className: 'feishu-muted' }, `插件托管进程 · 自动重试次数：${tunnel.restartCount || 0}${tunnel.nextRetryAt ? ` · 下次重试：${new Date(tunnel.nextRetryAt).toLocaleTimeString()}` : ''}`),
-                tunnelDirty && managedProvider && h('p', { role: 'status', className: 'feishu-muted' }, '隧道相关配置尚未保存，请先保存，再启动隧道。启动按钮仅使用已保存的配置。'),
+                !sharedTunnel && tunnel?.paused && h('p', { role: 'status', className: 'feishu-muted' }, '守护已暂停；点击启动，或关闭守护并保存后重新开启并保存，即可恢复。'),
+                !sharedTunnel && tunnel?.managed && h('p', { className: 'feishu-muted' }, `插件托管进程 · 自动重试次数：${tunnel.restartCount || 0}${tunnel.nextRetryAt ? ` · 下次重试：${new Date(tunnel.nextRetryAt).toLocaleTimeString()}` : ''}`),
+                !sharedTunnel && tunnelDirty && managedProvider && h('p', { role: 'status', className: 'feishu-muted' }, '隧道相关配置尚未保存，请先保存，再启动隧道。启动按钮仅使用已保存的配置。'),
                 h('div', { className: 'feishu-actions' },
-                  managedProvider && h('button', { type: 'button', disabled: Boolean(busy) || loading || tunnelDirty || savedMode !== 'webhook' || tunnel?.state === 'starting' || Boolean(tunnel?.managed && tunnel?.running),
+                  !sharedTunnel && managedProvider && h('button', { type: 'button', disabled: Boolean(busy) || loading || tunnelDirty || (savedMode !== 'webhook' && !savedConfig.serverTunnelRequired) || tunnel?.state === 'starting' || Boolean(tunnel?.managed && tunnel?.running),
                     onClick: () => run('tunnel-start', async () => {
-                      await request('tunnel/start', {});
+                      await tunnelRequest('tunnel/start', {});
                       await refreshStatus();
                       setNotice({ text: '已请求启动隧道，请查看运行状态与 Webhook 地址。' });
                     }) }, busy === 'tunnel-start' ? '启动中…' : '启动当前端口的隧道'),
-                  tunnel?.managed && h('button', { type: 'button', disabled: Boolean(busy),
+                  !sharedTunnel && tunnel?.managed && h('button', { type: 'button', disabled: Boolean(busy),
                     onClick: () => run('tunnel-stop', async () => {
-                      await request('tunnel/stop', {});
+                      await tunnelRequest('tunnel/stop', {});
                       await refreshStatus();
                       setNotice({ text: '已停止插件托管的隧道并暂停自动重试；点击启动或重新开启守护可恢复。' });
                     }) }, busy === 'tunnel-stop' ? '停止中…' : '停止托管隧道'),

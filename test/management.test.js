@@ -4,9 +4,9 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { createManagement } from '../lib/management.js';
+import { createManagement, ManagementError } from '../lib/management.js';
 
-async function fixture(t, values = new Map(), hooks = {}) {
+async function fixture(t, values = new Map(), hooks = {}, overrides = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'feishu-management-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const routes = new Map();
@@ -17,7 +17,7 @@ async function fixture(t, values = new Map(), hooks = {}) {
     webServer: { port: 3080, register: route => { routes.set(route.path, route.handler); return () => routes.delete(route.path); } },
     effect: effect => { const dispose = effect(); disposers.push(dispose); return dispose; },
   };
-  const config = { configFile: join(dir, 'settings.json'), path: '/webhook/feishu', workspacePath: dir, agentPreset: 'standard', permissionPreset: 'workspace-write' };
+  const config = { configFile: join(dir, 'settings.json'), path: '/webhook/feishu', workspacePath: dir, agentPreset: 'standard', permissionPreset: 'workspace-write', ...overrides };
   const client = { cachedToken: 'old-token', tokenExpireTime: 999999 };
   const service = await createManagement(ctx, config, client, hooks);
   t.after(async () => { for (const dispose of disposers.reverse()) await dispose?.(); });
@@ -27,7 +27,7 @@ async function fixture(t, values = new Map(), hooks = {}) {
     req.headers = { host: 'localhost:3080', cookie: 'authenticated', 'content-type': 'application/json', ...headers };
     let result;
     const res = { setHeader() {}, writeHead(status) { this.status = status; }, end(text) { result = { status: this.status, body: JSON.parse(text) }; } };
-    await routes.get(`/api/feishu-bot${path}`)(req, res);
+    await routes.get(`${hooks.routePrefix ?? '/api/feishu-bot'}${path}`)(req, res);
     return result;
   };
   return { dir, config, ctx, service, values, request, client, routes, disposers };
@@ -334,4 +334,125 @@ test('current settings preserve legacy identities without accepting name confirm
   assert.equal('nameConfirmed' in stored, false);
   assert.equal('profile' in f.config, false);
   assert.equal('nameConfirmed' in f.config, false);
+});
+
+
+const secondaryRefs = { appIdEnv: 'FEISHU_PROJECT_APP_ID', appSecretEnv: 'FEISHU_PROJECT_APP_SECRET', verificationToken: 'FEISHU_PROJECT_VERIFICATION_TOKEN', encryptKey: 'FEISHU_PROJECT_ENCRYPT_KEY' };
+
+test('multiple bots isolate routes, credentials and projects while reading a shared tunnel', async t => {
+  const values = new Map();
+  const primary = await fixture(t, values);
+  await primary.service.updateConfig({ tunnelProvider: 'custom', publicBaseUrl: 'https://shared.example', appId: 'cli_primary', appSecret: 'primary-secret', verificationToken: 'primary-verify', encryptKey: 'primary-encrypt' });
+  const secondary = await fixture(t, values, { sharedTunnel: primary.service, routePrefix: '/api/feishu-bot/bots/project' }, { ...secondaryRefs, path: '/webhook/feishu/project' });
+  await secondary.service.updateConfig({ appId: 'cli_project', appSecret: 'project-secret', verificationToken: 'project-verify', encryptKey: 'project-encrypt', connectionMode: 'webhook' });
+  const config = (await secondary.request('/config')).body;
+  assert.equal(config.sharedTunnel, true);
+  assert.equal(config.serverTunnelRequired, true);
+  assert.equal(config.tunnelProvider, 'custom');
+  assert.equal(config.publicBaseUrl, 'https://shared.example');
+  assert.equal(config.appId, 'cli_project');
+  assert.equal(config.capabilities.tunnelProcessControl, false);
+  assert.equal((await primary.service.getConfig()).appId, 'cli_primary');
+  assert.equal(values.get('FEISHU_APP_SECRET'), 'primary-secret');
+  assert.equal(values.get(secondaryRefs.appSecretEnv), 'project-secret');
+  assert.equal(values.get('FEISHU_VERIFICATION_TOKEN'), 'primary-verify');
+  assert.equal(values.get(secondaryRefs.verificationToken), 'project-verify');
+  assert.equal(await secondary.service.getWebhookUrl(), 'https://shared.example/webhook/feishu/project');
+  assert.equal((await secondary.service.getTunnelStatus()).sharedTunnel, true);
+  assert.ok([...secondary.routes.keys()].every(path => path.startsWith('/api/feishu-bot/bots/project/')));
+  for (const path of ['/config', '/tunnel/start', '/tunnel/stop']) assert.equal((await secondary.request(path, 'POST', {}, { cookie: '' })).status, 403);
+  await secondary.service.dispose();
+  assert.equal(secondary.routes.size, 0);
+  assert.ok(primary.routes.size > 0);
+  assert.equal((await primary.request('/config')).status, 200);
+});
+
+test('shared tunnel changes are rejected atomically and secondary disposal never owns the supervisor', async t => {
+  let disposed = 0;
+  let reconciled = 0;
+  const primary = await fixture(t, new Map(), { tunnelSupervisor: { reconcile: async () => reconciled++, dispose: async () => disposed++, status: async () => ({ state: 'running', url: 'https://shared.example' }) } });
+  await primary.service.updateConfig({ publicBaseUrl: 'https://shared.example' });
+  const secondary = await fixture(t, primary.values, { sharedTunnel: primary.service }, secondaryRefs);
+  for (const input of [{ publicBaseUrl: 'https://different.example' }, { tunnelAutoRestart: true }, { ngrokAuthtoken: 'must-not-save' }]) {
+    assert.equal((await secondary.request('/config', 'POST', { ...input, appSecret: 'must-not-save' })).status, 400);
+  }
+  assert.equal(primary.values.has(secondaryRefs.appSecretEnv), false);
+  assert.equal((await secondary.request('/config', 'POST', { publicBaseUrl: 'https://shared.example/', tunnelAutoRestart: false, ngrokAuthtoken: '' })).status, 200);
+  for (const path of ['/tunnel/start', '/tunnel/stop', '/ngrok/start', '/ngrok/stop']) assert.equal((await secondary.request(path, 'POST', {})).status, 409);
+  const before = reconciled;
+  await secondary.service.reconcileTunnel();
+  await secondary.service.dispose();
+  assert.equal(disposed, 0);
+  assert.equal(reconciled, before);
+  await primary.service.dispose();
+  assert.equal(disposed, 1);
+});
+
+test('global tunnel remains usable when only a secondary bot uses webhook', async t => {
+  let required = true;
+  const primary = await fixture(t, new Map(), { isTunnelRequired: () => required });
+  await primary.service.updateConfig({ connectionMode: 'websocket', tunnelProvider: 'custom', publicBaseUrl: 'https://global.example' });
+  const secondary = await fixture(t, primary.values, { sharedTunnel: primary.service }, { ...secondaryRefs, path: '/webhook/feishu/project' });
+  assert.equal(await primary.service.getWebhookUrl(), null);
+  assert.equal(await primary.service.getPublicBaseUrl(), 'https://global.example');
+  assert.equal(await secondary.service.getWebhookUrl(), 'https://global.example/webhook/feishu/project');
+  assert.equal((await primary.service.getTunnelStatus()).state, 'configured');
+  assert.equal((await secondary.service.getTunnelStatus()).state, 'configured');
+  assert.equal((await primary.service.getConfig()).serverTunnelRequired, true);
+  await secondary.service.updateConfig({ connectionMode: 'websocket' });
+  required = false;
+  assert.equal(await secondary.service.getWebhookUrl(), null);
+  assert.equal((await primary.service.getTunnelStatus()).state, 'not_required');
+  assert.equal((await secondary.service.getConfig()).serverTunnelRequired, false);
+});
+
+test('management rejects invalid route prefixes and reused secondary credentials', async t => {
+  const primary = await fixture(t);
+  for (const routePrefix of ['/api/feishu-bot/', '/api/../config', '/api/feishu?x', '/webhook/feishu']) await assert.rejects(createManagement(primary.ctx, { ...primary.config }, null, { routePrefix }), /prefix/);
+  await assert.rejects(createManagement(primary.ctx, { ...primary.config }, null, { sharedTunnel: primary.service }), /independent credential/);
+  await assert.rejects(createManagement(primary.ctx, { ...primary.config, ...secondaryRefs, appSecretEnv: 'FEISHU_APP_SECRET' }, null, { sharedTunnel: primary.service }), /independent credential/);
+});
+
+test('beforeUpdate rejects duplicate application IDs before any persistent writes', async t => {
+  let checked = 0;
+  const f = await fixture(t, new Map(), { beforeUpdate: async (input, updates) => {
+    checked++;
+    assert.equal(input.appId, 'cli_duplicate');
+    assert.equal(updates.connectionMode, 'websocket');
+    throw new ManagementError(409, '应用已用于另一机器人');
+  } });
+  const result = await f.request('/config', 'POST', { appId: 'cli_duplicate', appSecret: 'must-not-save', connectionMode: 'websocket' });
+  assert.equal(result.status, 409);
+  assert.equal(checked, 1);
+  assert.equal(f.values.size, 0);
+  assert.equal(f.config.connectionMode, 'webhook');
+  await assert.rejects(readFile(f.config.configFile), { code: 'ENOENT' });
+});
+
+test('catalog serialization orders complete cross-bot saves and disposal drains pending writes', async t => {
+  let queue = Promise.resolve();
+  const serializeUpdate = operation => {
+    const next = queue.then(operation);
+    queue = next.catch(() => {});
+    return next;
+  };
+  const order = [];
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const primary = await fixture(t, new Map(), { serializeUpdate, beforeUpdate: async () => { order.push('primary-start'); await gate; order.push('primary-end'); } });
+  const secondary = await fixture(t, primary.values, { sharedTunnel: primary.service, serializeUpdate, beforeUpdate: async () => { order.push('secondary'); } }, secondaryRefs);
+  const one = primary.service.updateConfig({ appId: 'cli_primary' });
+  const two = secondary.service.updateConfig({ appId: 'cli_secondary' });
+  let disposed = false;
+  const disposal = secondary.service.dispose().then(() => { disposed = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(order, ['primary-start']);
+  assert.equal(disposed, false);
+  assert.equal(secondary.routes.size, 0);
+  assert.throws(() => secondary.service.updateConfig({}), /关闭/);
+  release();
+  await Promise.all([one, two, disposal]);
+  assert.deepEqual(order, ['primary-start', 'primary-end', 'secondary']);
+  assert.equal(disposed, true);
+  assert.equal(primary.values.get(secondaryRefs.appIdEnv), 'cli_secondary');
 });

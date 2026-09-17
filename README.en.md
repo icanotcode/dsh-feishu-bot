@@ -12,7 +12,7 @@ English · [简体中文](README.md)
 
 ## Introduction
 
-`dsh-feishu-bot` connects a Feishu bot to DeepSeek Harness. Expand its card in the Harness Plugin list to enter application credentials, choose how to receive events, and set a working directory for tasks.
+`dsh-feishu-bot` connects multiple Feishu bots to one DeepSeek Harness server, with a separate project for each bot. Expand its card in the Harness Plugin list to select or add a bot, configure its application credentials and event transport, and choose its project directory.
 
 The plugin supports two connection modes: **developer server (HTTP Webhook)** and **persistent connection (WebSocket)**. Use Webhook if you have a public endpoint, ngrok, or Cloudflare Tunnel; choose WebSocket if you run Harness locally without a public endpoint. Saving the configuration applies the selected mode.
 
@@ -24,14 +24,15 @@ This is an independently maintained community plugin, unaffiliated with DeepSeek
 
 ## Settings preview
 
-![Feishu plugin settings](assets/settings-cloudflare.png)
+![Feishu plugin settings](assets/settings-multi-bot.png)
 
-Actual settings UI captured in an isolated demo environment with no application credentials configured. This older 0.1.3 screenshot predates the move into the Plugin list card and does not show the current name-confirmation flow or daily reset settings; the example hostname does not indicate a working public tunnel.
+Current multi-bot settings captured in an isolated test instance, showing selection, creation, enable/disable controls, and a separate project directory. The App ID and path are test data; passwords remain blank. The settings dialog was enlarged for the screenshot to show the upper form together.
 
 ## Current capabilities
 
 | Capability | Current behavior |
 | --- | --- |
+| Multiple bots and projects | One Harness serves multiple Feishu applications with separate credentials, name profiles, sessions, history databases, and attachments |
 | Plugin list entry | Expand the `feishu-bot` card in Plugin list to configure the plugin directly |
 | Two event transports | Choose Webhook or WebSocket; saving updates the runtime configuration |
 | Messages and attachments | Receives text, rich text (`post`), images, files, video, and audio through `im.message.receive_v1`; reuses the current session for the same tenant, user, and chat |
@@ -43,11 +44,11 @@ Actual settings UI captured in an isolated demo environment with no application 
 | Connection checks | Tests application credentials, displays WebSocket connection status, and detects local ngrok tunnels |
 | User access | Feishu app availability controls access; each user must provide and confirm a name before tasks, with no prefilled `open_id` or name list |
 | User isolation | Separate user workspaces and SQLite databases, with separate context per chat; identical names do not merge data |
-| Session controls | At most one current visible Harness session per user, named after their confirmed name; `/new`, `/whoami`, `/help`, `/status` |
+| Session controls | At most one current visible Harness session per user within each bot, named after their confirmed name; `/new`, `/whoami`, `/help`, `/status` |
 | History | Timestamped records; Agent tools can search, read, add notes, update, and soft-delete records belonging to the current user and chat |
 | Daily reset | Archives the old session at 04:00 Asia/Macau by default; the next message starts fresh context, after running work finishes; history and files remain |
 
-**Remote Feishu sessions only receive restricted workspace-file, personal-history, and current-message attachment tools.** Arbitrary shell execution, general MCP tools, and Feishu APIs that could access other users’ data are not exposed. Workspace-write only applies to the user’s own directory; read-only forbids workspace file changes. New users inherit the global permission preset. Existing per-user permission overrides from older configurations are retained. The local Harness administrator retains control of the host and stored data.
+**Remote Feishu sessions only receive restricted workspace-file, personal-history, and current-message attachment tools.** Arbitrary shell execution, general MCP tools, and Feishu APIs that could access other users’ data are not exposed. Workspace-write only applies to the user’s own directory; read-only forbids workspace file changes. New users inherit their bot’s permission preset. Existing per-user permission overrides from older configurations are retained. The local Harness administrator retains control of the host and stored data.
 
 ### Examples
 
@@ -59,7 +60,7 @@ Or add the bot to a group and @mention it:
 
 > Update the proposal in my working directory using the requirements we discussed earlier.
 
-A corresponding session appears in Harness, and the plugin sends the final text reply when processing finishes. These are natural-language request examples; the result depends on the model, Agent preset, working directory, and permissions. Follow-up messages in the same chat reuse context. `/new`, or switching to another direct or group chat, archives the previous session before starting fresh context. Each user has at most one current visible session; running work finishes before the switch rather than being cancelled.
+A corresponding session appears in Harness, and the plugin sends the final text reply when processing finishes. These are natural-language request examples; the result depends on the model, Agent preset, working directory, and permissions. Follow-up messages in the same chat reuse context. `/new`, or switching to another direct or group chat, archives the previous session before starting fresh context. Each user has at most one current visible session within each bot; running work finishes before the switch rather than being cancelled.
 
 ### Files, images, video, and audio
 
@@ -139,13 +140,27 @@ To start a Cloudflare Quick Tunnel in another terminal, install `cloudflared` fi
 npm run start:cloudflare -- --port 3080
 ```
 
-Select **Cloudflare Tunnel** in the plugin, copy the generated `https://…trycloudflare.com` root URL from the log into “公网服务地址”, and save. Add `/webhook/feishu` when entering the URL in the Feishu console. Quick Tunnel URLs change between runs; use a named tunnel for a stable setup. The plugin panel can also launch and supervise the tunnel. Saving an address alone does not verify public reachability.
+Select **Cloudflare Tunnel** in the plugin, copy the generated `https://…trycloudflare.com` root URL from the log into “公网服务地址”, and save. The default bot uses `/webhook/feishu`; for added bots, copy the full callback URL generated in their own panel. Quick Tunnel URLs change between runs; use a named tunnel for a stable setup. The plugin panel can also launch and supervise the tunnel. Saving an address alone does not verify public reachability.
 
 See the **[Feishu setup guide (Chinese)](docs/setup.md)** for field descriptions, permissions, commands for both tunnel providers, and the configuration sequence.
 
+### Connect multiple bots to one server
+
+Use **当前机器人** at the top of the plugin card to select an application. Choose **添加机器人**, enter a display name and an existing absolute project directory, then save that bot's App ID, App Secret, and event transport. Each bot must use a different Feishu App ID and a distinct project directory. Webhook and WebSocket bots can run together.
+
+Once an App ID is bound, it cannot be replaced. Add a new bot for another Feishu application so each application retains its own history. You can update the same application’s App Secret and other credentials after any running task finishes.
+
+**重命名** changes only the display name. **停用** preserves configuration and stored data while preventing new messages and tasks; disabling a busy bot is rejected until its task finishes. Switching away from unsaved configuration requires confirmation. Credentials are never copied into another bot's form.
+
+ngrok / Cloudflare is one shared server tunnel, managed under **默认机器人（共享隧道设置）**. These controls remain available when the default bot uses WebSocket but another enabled bot requires Webhook. Each bot has a separate callback path: the default retains `/webhook/feishu`, while added bots receive unique subpaths. Copy the selected bot's full callback URL into the matching Feishu application. If the public base URL changes, update every Webhook application's callback.
+
+If an existing ingress policy only allows the default callback, also allow POST requests to each added bot's callback path. Keep the management UI protected; the plugin does not rewrite your ingress policy.
+
+Existing credentials, workspaces, sessions, and history remain attached to the default bot on upgrade. Added bots do not inherit application secrets or user profiles. The same person confirms their name independently for each bot and uses separate project data. The one-current-session rule applies to each user within each bot.
+
 ### Start and supervise tunnels
 
-Install the native ngrok or cloudflared binary for Linux, Windows or macOS, then use PATH or set an absolute executable path in the plugin. Save the provider settings and click **启动当前端口的隧道**. The actual Harness port is used; no Bash alias is involved.
+Select the default bot to manage the shared tunnel. Install the native ngrok or cloudflared binary for Linux, Windows or macOS, then use PATH or set an absolute executable path in the plugin. Save the provider settings and click **启动当前端口的隧道**. The actual Harness port is used; no Bash alias is involved.
 
 The **隧道守护** switch takes effect after saving. It starts a missing tunnel and retries unexpected exits with backoff capped at 60 seconds. Turning it off disables retries without stopping a running child. **停止托管隧道** stops only the plugin-owned child and pauses supervision until manual start or an off/save/on/save cycle. This supervisor runs inside Harness, not as an OS service; shutdown cleans up its own child processes.
 
@@ -169,21 +184,21 @@ A successful credential test confirms application authentication. Saving the req
 | --- | --- |
 | Connection mode | `webhook` |
 | Public endpoint provider | `ngrok`; Webhook settings also offer Cloudflare Tunnel and a custom public URL |
-| Callback path | `/webhook/feishu` |
+| Callback path | The default bot retains `/webhook/feishu`; added bots receive unique subpaths |
 | Agent preset | `standard`; it must already be installed in Harness |
 | Permission preset | `workspace-write`; `read-only` is the only alternative, and full-access presets are rejected |
 | Working directory | A root for separate user subdirectories; select a dedicated empty directory before first use |
 | User access | Controlled through Feishu app availability; provide a name and reply `确认` before starting tasks |
 | Daily context reset | `04:00` in `Asia/Macau`; archives the old session after running work finishes, retaining SQLite history and archived Harness logs |
 | Model | Uses the default Harness model configuration unless specified separately |
-| Non-secret configuration | Stored in `feishu-bot.json` under `DSH_HOME`; the default `DSH_HOME` is `~/.dsh` |
+| Non-secret configuration | The default retains `feishu-bot.json`; added bots use separate configuration files and a bot catalog under `DSH_HOME` (default `~/.dsh`) |
 | Secrets | Saved by the Harness credentials service; blank settings fields preserve existing values. Values supplied through environment variables must be changed in the startup environment |
 
 Deleting a Feishu workspace in the Harness UI only removes its registration. The next ordinary message recreates that registration and reconnects the existing session, preserving context. Deleting the actual working directory is different: the plugin can recreate an empty directory but cannot recover deleted working files; its separately stored history database is unaffected by removing only that directory.
 
 Archiving the active Feishu session in Harness causes the next ordinary Feishu message to start a new, visible session. Existing work finishes first. The old session stays archived and its history remains searchable; its model context is not copied into the new session. `/status` reports an archived current session.
 
-Databases are separated by stable source, tenant, and user identity. Names are stored in user profiles and used for session titles, not as database or workspace paths. Two users with the same name still have separate data. Switching between a user’s direct and group chats archives the previous active context before creating a new one. History tools remain restricted to records for the current user and chat, with timestamps stored in local SQLite databases.
+Databases are separated by stable bot source, tenant, and user identity. Names are stored in user profiles and used for session titles, not as database or workspace paths. Two users with the same name still have separate data. Switching between a user’s direct and group chats archives the previous active context before creating a new one. History tools remain restricted to records for the current user and chat, with timestamps stored in local SQLite databases.
 
 `/new` and daily resets archive the old entry from the current Harness session list while retaining SQLite history, archived Harness logs, and working files. A new session is created on the next message. On restart, the plugin also archives leftover entries for already-closed sessions. Legacy databases missing identity metadata are updated on the first verified Feishu message; subsequent daily resets run even when no new messages arrive.
 

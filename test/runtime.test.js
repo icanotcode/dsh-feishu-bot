@@ -42,6 +42,17 @@ test('v2 header token, lossless delivery and duplicate retries', async () => {
   assert.equal((await ingress({}).send(event())).status, 503);
 });
 
+test('an authenticated event for another configured application is rejected before dispatch', () => {
+  const deliveries = [];
+  const receive = createFeishuEventReceiver({ webhookRuntime: { dispatch: delivery => deliveries.push(delivery) } }, { ...config, expectedAppId: 'cli_bot_a' });
+  const wrong = event(); wrong.header.app_id = 'cli_bot_b';
+  assert.throws(() => receive(wrong, { authenticated: true }), error => error.status === 401);
+  assert.equal(deliveries.length, 0);
+  const correct = event(); correct.header.app_id = 'cli_bot_a';
+  receive(correct, { authenticated: true });
+  assert.equal(deliveries.length, 1);
+});
+
 test('encrypted signed event decrypts and tampered signature is rejected', async () => {
   const api = ingress({ KEY: 'test-key' });
   const iv = Buffer.alloc(16, 1);
