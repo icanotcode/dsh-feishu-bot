@@ -37,6 +37,7 @@ Current multi-bot settings captured in an isolated test instance, showing select
 | Two event transports | Choose Webhook or WebSocket; saving updates the runtime configuration |
 | Messages and attachments | Receives text, rich text (`post`), images, files, video, and audio through `im.message.receive_v1`; reuses the current session for the same tenant, user, and chat |
 | File replies and image reading | Sends files or media from the user workspace to the current message; models declaring image input can inspect older images |
+| Personal email sending | Bind your own Feishu mailbox, SMTP authorization code, and fixed recipient in a direct chat; send text and personal-workspace attachments on explicit request; no inbox access |
 | Working indicator | Adds a `Typing` reaction to the original message when processing starts and attempts to remove it when processing ends; reaction failures do not block the task or reply |
 | Automatic replies | Replies to the original message with the Agent's final text; splits long replies into multiple messages |
 | Webhook verification | Handles URL verification, Verification Token checks, encrypted payload decryption, and signature verification |
@@ -48,7 +49,7 @@ Current multi-bot settings captured in an isolated test instance, showing select
 | History | Timestamped records; Agent tools can search, read, add notes, update, and soft-delete records belonging to the current user and chat |
 | Daily reset | Archives the old session at 04:00 Asia/Macau by default; the next message starts fresh context, after running work finishes; history and files remain |
 
-**Remote Feishu sessions only receive restricted workspace-file, personal-history, and current-message attachment tools.** Arbitrary shell execution, general MCP tools, and Feishu APIs that could access other users’ data are not exposed. Workspace-write only applies to the user’s own directory; read-only forbids workspace file changes. New users inherit their bot’s permission preset. Existing per-user permission overrides from older configurations are retained. The local Harness administrator retains control of the host and stored data.
+**Remote Feishu sessions only receive restricted workspace-file, personal-history, current-message attachment, and personal-mail tools.** Arbitrary shell execution, general MCP tools, and Feishu APIs that could access other users’ data are not exposed. Workspace-write only applies to the user’s own directory; read-only forbids workspace file changes. New users inherit their bot’s permission preset. Existing per-user permission overrides from older configurations are retained. The local Harness administrator retains control of the host and stored data.
 
 ### Examples
 
@@ -81,6 +82,16 @@ The sending tool takes `feishu_send_file(path, kind, coverPath?, duration?)`: `p
 Image understanding uses the model already configured in Harness, and only when that model explicitly declares image input. `feishu_read_image` can inspect older images in the user's workspace. Text-only models can save, find, and send image files but cannot view them. Media transfer does not add automatic video analysis, transcription, OCR, conversion, general PDF/Office parsing, or arbitrary shell access. This is a plugin update: no Harness core modification, extra model, or additional settings navigation is required.
 
 Enable the corresponding API permissions and publish the app as described in the [attachment permissions guide (Chinese)](docs/setup.md#附件权限).
+
+### Send through your personal Feishu mailbox
+
+Complete name confirmation first. Ordinary conversation does not require an email binding. Your first request to send email, or `/mail` in a direct chat with the bot, starts setup: provide **your own Feishu mailbox → SMTP authorization code → recipient address**. Submit the code as `/mail code YOUR_CODE` when prompted. Plain text sent while waiting for the code is also intercepted before reaching the Agent. Authentication checks SMTP login only; it does not send a test email.
+
+Once ready, explicitly ask the Agent again to email a summary or a file. Requests made before setup are not automatically replayed. The sender and recipient come from your binding; the Agent cannot supply another account or recipient. Use `/mail status` to check the binding, `/mail to ADDRESS` to change the recipient, `/mail reset` to delete your binding, or `/mail cancel` to cancel unfinished setup while retaining an already-ready binding. Bindings are isolated by bot, tenant, and stable user ID, independently of display names.
+
+The plugin reads `skills/feishu-assistant/SKILL.md` and adds its instructions to each Feishu message entering the Agent; no separate Skill installation is required. This thin Skill supplies conversation and mail-tool guidance; the plugin's entry state machine handles name confirmation, email setup, and authorization-code protection. Codes are stored in Harness credentials and redacted before Webhook delivery, history, or model input. **The plugin does not remove the original messages retained by Feishu itself.**
+
+Sending uses the fixed `smtp.feishu.cn:465` endpoint with mandatory TLS, as described in [Feishu's third-party client guide](https://www.feishu.cn/hc/zh-CN/articles/902478147400). IMAP/inbox access is not implemented. Mail tools require a name-confirmed user with an active direct-chat task. `feishu_send_email` accepts a subject, text, and up to 10 paths within that user's directory; the estimated MIME message limit is 10 MiB and the text limit is 1 MiB. SQLite-backed deduplication protects repeated sends with the same message and content. **SMTP acceptance is not proof of delivery**; uncertain failures are not automatically retried. Real external-email delivery has not yet received end-to-end acceptance testing. See the [setup guide (Chinese)](docs/setup.md#个人邮箱发信) for the commands and details.
 
 ## Quick start
 

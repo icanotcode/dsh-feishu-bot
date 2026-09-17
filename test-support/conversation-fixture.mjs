@@ -29,7 +29,9 @@ export async function createConversationFixture(t, options = {}) {
   let rule;
   const fire = (name, payload) => [...listeners.get(name) ?? []].map(fn => fn(payload));
   const emit = async (name, payload) => { await Promise.all(fire(name, payload)); };
+  const credentialValues = new Map();
   const ctx = {
+    credentials: { resolve: async ref => credentialValues.has(ref) ? { value: credentialValues.get(ref), source: 'file' } : undefined, set: async (ref, value) => credentialValues.set(ref, value), unset: async ref => credentialValues.delete(ref) },
     logger: { warn: text => warnings.push(text), info() {}, debug() {} },
     on(name, fn) {
       if (!listeners.has(name)) listeners.set(name, new Set());
@@ -126,14 +128,15 @@ export async function createConversationFixture(t, options = {}) {
     fixture.host = options.host ?? makeHost();
     fixture.agents = fixture.host.agents;
     fixture.dispose = await installFeishuRuntime(ctx, config, client, options.tools ?? [], options.executeTool ?? (async () => null), {
-      history: fixture.history, host: fixture.host, now: () => clock, mediaApi: options.mediaApi,
+      history: fixture.history, host: fixture.host, now: () => clock, mediaApi: options.mediaApi, mail: options.mail,
     });
   }
-  fixture.send = async ({ text = 'hello', senderId = 'alice', chatId = 'chat-a', messageId, deliveryId, tenantId = 'tenant', timestamp, signal, attachments, attachmentError, msgType } = {}) => {
+  fixture.send = async ({ text = 'hello', senderId = 'alice', chatId = 'chat-a', messageId, deliveryId, tenantId = 'tenant', timestamp, signal, attachments, attachmentError, msgType, chatType = 'p2p' } = {}) => {
     messageId ??= `message-${++sequence}`;
     deliveryId ??= `delivery-${messageId}`;
+    const prepared = await fixture.dispose.prepareIngress({ userText: text, senderId, chatId, messageId, tenantId, chatType, msgType: msgType || 'text', ...(timestamp ? { timestamp } : {}), ...(attachments ? { attachments } : {}), ...(attachmentError ? { attachmentError } : {}) });
     await rule.run({ kind: 'feishu', source: config.source, deliveryId, receivedAt: clock,
-      event: { payload: { parsed: { userText: text, senderId, chatId, messageId, tenantId, ...(timestamp ? { timestamp } : {}), ...(attachments ? { attachments } : {}), ...(attachmentError ? { attachmentError } : {}), ...(msgType ? { msgType } : {}) } } },
+      event: { payload: { parsed: prepared.parsed } },
     }, signal ?? new AbortController().signal);
     return { messageId, deliveryId };
   };

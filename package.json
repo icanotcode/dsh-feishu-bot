@@ -32,7 +32,8 @@
     "@deepseek-ai/dsh-util-values": "^0.1.5-rc.2",
     "@deepseek-ai/schemastery": "^3.18.2",
     "@larksuiteoapi/node-sdk": "1.74.0",
-    "js-yaml": "^4.1.0"
+    "js-yaml": "^4.1.0",
+    "nodemailer": "10.0.10"
   },
   "scripts": {
     "test": "node --test",
@@ -52,6 +53,7 @@
   "files": [
     "lib/",
     "client/",
+    "skills/",
     "scripts/",
     "cordis.patch.yml",
     "README.md",
