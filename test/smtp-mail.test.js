@@ -275,6 +275,7 @@ test('real SMTP 535 authentication rejection returns safe AUTH_FAILED with no se
   const local = await tlsSmtpServer(t, { acceptAuth: false });
   await assert.rejects(verifySmtp(local.config, password, { transportFactory: local.transportFactory, timeoutMs: 3000 }), error => {
     assert.equal(error.code, 'AUTH_FAILED'); assert.equal(error.uncertain, false);
+    assert.equal(error.smtpCode, 535); assert.equal(error.enhancedCode, '5.7.8'); assert.equal(error.authMethod, 'PLAIN');
     assert.ok(!String(error).includes(password)); assert.ok(!JSON.stringify(error).includes(password));
     assert.equal(error.response, undefined); assert.equal(error.cause, undefined);
     return true;
@@ -394,4 +395,21 @@ test('publicOnly refuses loopback before opening sockets for probes, verificatio
   await assert.rejects(verifySmtp(local, password, { publicOnly: true, timeoutMs: 500 }), code('CONNECTION_FAILED'));
   await assert.rejects(sendSmtpMail(local, password, input, { publicOnly: true, timeoutMs: 500 }), code('CONNECTION_FAILED'));
   assert.equal(connections, 0);
+});
+
+test('SMTP authentication diagnostics retain only validated protocol fields and never raw AUTH payloads', async () => {
+  for (const raw of [
+    { responseCode: 454, response: `454 4.7.0 Temporary ${password}`, command: 'AUTH LOGIN', expected: [454, '4.7.0', 'LOGIN'] },
+    { responseCode: 504, response: `504 Unsupported ${password}`, command: 'AUTH PLAIN', expected: [504, undefined, 'PLAIN'] },
+    { responseCode: password, response: password, command: `AUTH PLAIN ${Buffer.from(password).toString('base64')}`, expected: [undefined, undefined, undefined] },
+    { responseCode: 235, response: '235 2.7.0 Success', command: password, expected: [undefined, undefined, undefined] },
+  ]) {
+    const transport = mockTransport(Object.assign(new Error(password), { code: 'EAUTH', ...raw }));
+    await assert.rejects(verifySmtp(config, password, transport), error => {
+      assert.deepEqual([error.smtpCode, error.enhancedCode, error.authMethod], raw.expected);
+      assert.doesNotMatch(JSON.stringify(error), new RegExp(`${password}|${Buffer.from(password).toString('base64')}`));
+      assert.equal(error.command, undefined); assert.equal(error.response, undefined); assert.equal(error.cause, undefined);
+      return true;
+    });
+  }
 });

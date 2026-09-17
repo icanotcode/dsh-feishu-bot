@@ -571,3 +571,21 @@ test('unavailable web service retains the request and never asks users for techn
   assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_discovery');
   assert.match(JSON.stringify([...app.values]), /pending-web/);
 });
+
+test('authentication replies distinguish temporary and protocol failures without blaming codes or leaking diagnostics', async () => {
+  const { SmtpMailError } = await import('../lib/smtp-mail.js');
+  for (const [smtpCode, expected] of [[454, /暂时拒绝认证/], [504, /认证命令或方式/], [534, /认证条件未满足/], [535, /不能仅凭此错误判断授权码有误/]]) {
+    const app = fixture({ verify: async () => { throw new SmtpMailError('AUTH_FAILED', 'private-server-text', { smtpCode, enhancedCode: '5.7.8', authMethod: 'PLAIN' }); } });
+    await app.handle('/mail'); await app.handle('sender@qq.com');
+    const result = await app.handle('/mail code', { secret: 'private-auth-code' });
+    assert.match(result.reply, expected);
+    assert.ok(result.reply.includes(`SMTP ${smtpCode}`));
+    assert.match(result.reply, /AUTH PLAIN/);
+    assert.doesNotMatch(result.reply, /private-server-text|private-auth-code/);
+    assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_code');
+    assert.equal(await app.flow.getAccount(alice), null);
+  }
+  const app = fixture({ verify: async () => { throw Object.assign(new Error('private'), { code: 'AUTH_FAILED', smtpCode: 'secret-status', enhancedCode: 'secret-enhanced', authMethod: 'secret-command' }); } });
+  await app.handle('/mail'); await app.handle('sender@qq.com');
+  assert.doesNotMatch((await app.handle('/mail code', { secret: 'private-code' })).reply, /secret-|private/);
+});

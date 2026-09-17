@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- SMTP 登录失败现在保留经过白名单过滤的数字状态码与认证方式，区分暂时拒绝、认证命令不兼容等情况；不回传服务器原文，不再把所有认证失败都归因于授权码。
+
 - 新增可选个人邮箱发信：姓名确认后，首次发送请求或私聊 `/mail` 引导填写本人邮箱，已知服务商快速匹配，未知域名由 Agent 调用专用工具在线发现 SMTP 参数，用户无需填写服务器、端口及加密方式；可用配置先经过无凭据 TLS／SMTP 探测，再验证授权码。当前明确发信请求及已明确收件人按机器人、用户和私聊隔离保留，绑定后继续任务，仅补问缺失内容，无需重复发送指令。手动配置不会自动发信，取消或重置丢弃待办，不重放历史草稿，不实现 IMAP 收信。
 - 读取 `skills/feishu-assistant/SKILL.md` 并将指引加入每条进入 Agent 的飞书消息；配置命令和授权码输入由入口状态机处理，等待授权码时普通文本也被拦截。授权码在进入 Webhook 投递、历史及模型前脱敏，按机器人、租户、open_id 分别保存到 Harness credentials；不清除飞书平台原始聊天记录。
 - 新增 `/mail setup/status/retry/reset/cancel`、`/mail server`、`/mail code`、`/mail to` 及 `feishu_mail_status`、`feishu_mail_setup`、`feishu_mail_discover`、`feishu_mail_web_search`、`feishu_mail_web_read`、`feishu_mail_web_apply`、`feishu_send_email` 工具；仅限已确认姓名用户的活跃私聊任务，账号与收件人取本人绑定。SMTP 主机、端口及 TLS／STARTTLS 按机器人和用户分别配置，自动匹配并保留高级手动覆盖；更换服务须重新验证，认证验证不发送测试邮件。
