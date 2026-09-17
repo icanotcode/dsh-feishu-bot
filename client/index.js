@@ -302,6 +302,7 @@ window.__ModuleLoader__.load({
       const [reload, setReload] = useState(0);
       const [connected, setConnected] = useState(false);
       const [setupReport, setSetupReport] = useState(null);
+      const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
       const [setupPhase, setSetupPhase] = useState('');
       const [secretFlags, setSecretFlags] = useState({});
       const [sharedTunnel, setSharedTunnel] = useState(botId !== 'default');
@@ -368,6 +369,7 @@ window.__ModuleLoader__.load({
         finally { setBusy(''); }
       }
       function edit(key, value) {
+        setDiagnosticsOpen(false);
         setSetupReport(null);
         setConfig(previous => ({ ...previous, [key]: value }));
         setConnected(false);
@@ -390,24 +392,10 @@ window.__ModuleLoader__.load({
           options.hint && h('small', null, options.hint),
           secretFlags[key] && h('small', null, key === 'appId' ? '已绑定此应用；切换应用请新增机器人。' : '已保存凭证；填写新值可替换。'));
       }
-      async function configureSetup() {
-        setSetupReport(null);
-        try {
-          setSetupPhase('正在验证应用凭据…');
-          // Validate before binding App ID permanently. Failed authentication
-          // leaves the draft intact and never starts a tunnel.
-          await botRequest('test', payload());
-          setSetupPhase('正在保存配置…');
-          await botRequest('config', payload());
-          applyConfig(await botRequest('config'));
-          setSetupPhase('正在检查配置，并尝试启动所选隧道…');
-          setSetupReport(await botRequest('setup/repair', {}));
-          await refreshStatus();
-        } finally { setSetupPhase(''); }
-      }
       async function recheckSetup() {
+        setDiagnosticsOpen(true);
         setSetupReport(null);
-        setSetupPhase('正在重新检查已保存的配置…');
+        setSetupPhase('正在检查已保存配置的连接问题…');
         try {
           setSetupReport(await botRequest('setup/check', {}));
           await refreshStatus();
@@ -444,31 +432,7 @@ window.__ModuleLoader__.load({
         loading ? h('p', { role: 'status' }, '正在读取配置…') : loadError
           ? h('div', { role: 'alert' }, h('p', null, loadError), button('重新加载', () => setReload(reload + 1), 'reload'))
           : h(React.Fragment, null,
-            h('section', { className: 'feishu-setup', 'aria-labelledby': `${prefix}-setup-title` },
-              h('h3', { id: `${prefix}-setup-title` }, '快速配置'),
-              h('p', null, '先填写应用凭证、选择项目与接收方式，再一键保存、检查并尝试启动已配置的隧道。已有配置可直接重新检查。'),
-              h('ol', { className: 'feishu-setup-steps' },
-                h('li', null, h('a', { href: `#${prefix}-app-section` }, '填写飞书应用凭证'), '，应用需由管理员在飞书后台创建。'),
-                h('li', null, h('a', { href: `#${prefix}-connection-section` }, '选择接收方式'), '和', h('a', { href: `#${prefix}-project-section` }, '项目目录'), '；Webhook 还需配置公网入口，长连接无需隧道。'),
-                h('li', null, '执行配置后，按下方检查结果完成飞书后台待办，并实际发送消息验收。')),
-              h('div', { className: 'feishu-actions' },
-                button('保存并一键配置', () => run('setup', configureSetup), 'setup', true),
-                h('button', { type: 'button', disabled: Boolean(busy) || dirty, 'aria-busy': busy === 'setup-check', onClick: () => run('setup-check', recheckSetup) }, busy === 'setup-check' ? '检查中…' : '重新检查')),
-              dirty && h('p', { className: 'feishu-state-banner is-attention' }, '有未保存的修改，请点击「保存并一键配置」后再复检。'),
-              setupPhase && h('p', { role: 'status', 'aria-live': 'polite', className: 'feishu-state-banner is-working' }, setupPhase),
-              h('p', { className: 'feishu-muted' }, '自动步骤不会代替你开通飞书权限、发布应用或验证真实消息；不会发送测试消息、邮件或付费模型请求。'),
-              setupReport && h('div', { className: 'feishu-setup-report', 'aria-live': 'polite' },
-                h('p', { role: 'status', className: `feishu-state-banner ${setupReport.checks.some(item => item.state === 'error') ? 'is-error' : setupReport.checks.some(item => item.state !== 'ok') ? 'is-attention' : 'is-success'}` }, `检查完成：${setupReport.checks.filter(item => item.state === 'ok').length} 项通过，${setupReport.checks.filter(item => item.state !== 'ok').length} 项需要处理或确认。实际收发仍需验收。`),
-                setupReport.callbackUrl && h('div', { className: 'feishu-field' },
-                  h('label', { htmlFor: `${prefix}-setup-callback` }, '当前机器人的飞书回调地址'),
-                  h('div', { className: 'feishu-actions' },
-                    h('input', { id: `${prefix}-setup-callback`, readOnly: true, value: setupReport.callbackUrl }),
-                    button('复制回调地址', () => run('setup-copy', async () => { await navigator.clipboard.writeText(setupReport.callbackUrl); setNotice({ text: '回调地址已复制，请在飞书后台保存并验证。' }); }), 'setup-copy'))),
-                h('ul', { className: 'feishu-setup-checks' }, setupReport.checks.map(item => h('li', { key: item.id, 'data-check-state': item.state },
-                  h('div', { className: 'feishu-setup-check-heading' }, h('strong', null, item.title), h('span', { className: 'feishu-state-badge', 'data-state': item.state }, ({ ok: '已通过', action: '待处理', warning: '待确认', error: '检查失败' })[item.state] || '待确认')),
-                  h('p', null, item.message),
-                  safeSetupLink(item.action?.url) && h('a', { href: safeSetupLink(item.action.url), target: '_blank', rel: 'noopener noreferrer' }, item.action.label))))),
-              notice && h('p', { role: notice.error ? 'alert' : 'status', className: `feishu-state-banner ${notice.error ? 'is-error' : 'is-success'}` }, notice.text)),
+            notice && h('p', { role: notice.error ? 'alert' : 'status', className: `feishu-state-banner ${notice.error ? 'is-error' : 'is-success'}` }, notice.text),
             h('form', { onSubmit: event => {
               event.preventDefault();
               run('save', async () => {
@@ -486,14 +450,27 @@ window.__ModuleLoader__.load({
                 ], hint: '选择后保存生效，并在飞书开放平台的「事件与回调 → 事件配置」中选择相同的订阅方式。' }),
                 config.connectionMode !== savedMode && h('p', { role: 'status', className: 'feishu-muted' },
                   `连接方式尚未保存；已保存的方式为${modeName(savedMode)}。`),
-                h('p', { role: 'status' }, connection
+                h('p', { role: 'status', className: ['error', 'disconnected', 'stopped'].includes(connection?.state) ? 'feishu-state-banner is-error' : ['reconnecting', 'waiting_configuration'].includes(connection?.state) ? 'feishu-state-banner is-attention' : undefined }, connection
                   ? `当前运行：${modeName(connection.mode)} · ${stateNames[connection.state] || connection.state || '状态未知'}`
                   : '正在读取当前连接状态…'),
                 connection?.message && h('p', { className: 'feishu-muted' }, connection.message),
-                connectionError && h('p', { role: 'alert', className: 'feishu-error' }, `连接状态暂不可用：${connectionError}`),
+                connectionError && h('p', { role: 'alert', className: 'feishu-state-banner is-error' }, `连接状态暂不可用：${connectionError}。可点击「检查连接问题」排查。`),
+                ['error', 'disconnected', 'stopped', 'reconnecting', 'waiting_configuration'].includes(connection?.state) && h('p', { className: 'feishu-muted' }, connection.state === 'waiting_configuration' ? '请填写应用凭证并保存，再点击「检查连接问题」。' : '请检查本机网络与飞书后台配置，点击「检查连接问题」查看具体待办。'),
                 config.connectionMode === 'websocket' && h('p', { className: 'feishu-muted' },
                   '长连接使用 App ID 和 App Secret，无需公网地址、公网隧道、Verification Token 或 Encrypt Key。保存后由 Harness 建立连接；在飞书后台同步选择「使用长连接接收事件」，并订阅 im.message.receive_v1。'),
-                button('刷新连接状态', () => run('status', refreshStatus), 'status')),
+                h('div', { className: 'feishu-actions' },
+                  h('button', { type: 'button', disabled: Boolean(busy) || dirty, 'aria-busy': busy === 'connection-check', 'aria-expanded': diagnosticsOpen, 'aria-controls': `${prefix}-diagnostics`, onClick: () => run('connection-check', recheckSetup) }, busy === 'connection-check' ? '检查中…' : '检查连接问题'),
+                  diagnosticsOpen && button('收起检查结果', () => setDiagnosticsOpen(false), 'close-check')),
+                dirty && h('p', { className: 'feishu-muted' }, '有未保存的修改；请先保存配置，再检查连接问题。'),
+                diagnosticsOpen && h('div', { id: `${prefix}-diagnostics`, className: 'feishu-diagnostics' },
+                  setupPhase && h('p', { role: 'status', 'aria-live': 'polite', className: 'feishu-state-banner is-working' }, setupPhase),
+              setupReport && h('div', { className: 'feishu-diagnostic-report', 'aria-live': 'polite' },
+                h('p', { role: 'status', className: `feishu-state-banner ${setupReport.checks.some(item => item.state === 'error') ? 'is-error' : setupReport.checks.some(item => item.state !== 'ok') ? 'is-attention' : 'is-success'}` }, `检查完成：${setupReport.checks.filter(item => item.state === 'ok').length} 项通过，${setupReport.checks.filter(item => item.state !== 'ok').length} 项需要处理或确认。实际收发仍需验收。`),
+                h('ul', { className: 'feishu-diagnostic-checks' }, setupReport.checks.map(item => h('li', { key: item.id, 'data-check-state': item.state },
+                  h('div', { className: 'feishu-diagnostic-check-heading' }, h('strong', null, item.title), h('span', { className: 'feishu-state-badge', 'data-state': item.state }, ({ ok: '已通过', action: '待处理', warning: '待确认', error: '检查失败' })[item.state] || '待确认')),
+                  h('p', null, item.message),
+                  safeSetupLink(item.action?.url) && h('a', { href: safeSetupLink(item.action.url), target: '_blank', rel: 'noopener noreferrer' }, item.action.label))))),
+                  h('p', { className: 'feishu-muted' }, '此检查使用已保存的配置，不会保存修改、启动隧道或发送测试消息。'))),
               h('section', { id: `${prefix}-app-section` },
                 h('h3', null, '应用凭证'),
                 field('appId', 'App ID', { placeholder: 'cli_xxxxxxxxxxxxxxxx', hint: '在飞书开放平台的「凭证与基础信息」中获取。' }),
@@ -587,11 +564,11 @@ window.__ModuleLoader__.load({
                   }) }, '复制')),
                 h('p', { className: 'feishu-muted' }, '在飞书应用的「事件订阅」中填写公网可访问的请求地址，并添加 im.message.receive_v1 事件。'),
                 ),
-                h('p', { role: 'status' }, tunnel
+                h('p', { role: 'status', className: tunnel?.state === 'error' ? 'feishu-state-banner is-error' : tunnel?.state === 'backoff' ? 'feishu-state-banner is-attention' : undefined }, tunnel
                   ? `已保存配置的公网状态（${providerNames[tunnel.provider] || tunnel.provider}）：${tunnelStateNames[tunnel.state] || tunnel.state || '状态未知'}`
                   : '尚未取得公网接入状态'),
                 tunnel?.message && h('p', { className: 'feishu-muted' }, tunnel.message),
-                statusError && h('p', { role: 'alert', className: 'feishu-error' }, statusError),
+                statusError && h('p', { role: 'alert', className: 'feishu-state-banner is-error' }, statusError),
                 !sharedTunnel && config.tunnelProvider === 'ngrok' && h('div', { className: 'feishu-muted' },
                   h('p', null, '也可在本机手动启动 ngrok；插件会检测指向当前 Harness 端口的已有隧道。手动命令示例（按需保留 --traffic-policy-file）：'),
                   h('code', null, Number.isInteger(config.harnessPort) && config.harnessPort > 0
@@ -626,9 +603,9 @@ window.__ModuleLoader__.load({
       .feishu-settings{max-width:760px;padding:8px 4px 24px;color:var(--dsw-alias-label-primary,#202124);font-size:14px;line-height:1.6}
       .feishu-settings *{box-sizing:border-box}.feishu-settings h2{margin:0 0 4px;font-size:21px}.feishu-settings h3{margin:0 0 16px;font-size:16px}
       .feishu-settings section{border:1px solid var(--dsw-alias-border-l2,#ddd);border-radius:12px;padding:18px;margin:20px 0}
-      .feishu-setup{background:var(--dsw-alias-bg-layer-2,#f6f8fc)}.feishu-setup-steps{padding-left:22px}.feishu-setup-steps li{margin:8px 0}
-      .feishu-setup-checks{list-style:none;padding:0 4px 0 0;margin:12px 0;max-height:420px;overflow:auto;overscroll-behavior:contain}.feishu-setup-checks>li{padding:12px 0;border-top:1px solid var(--dsw-alias-border-l2,#ddd)}.feishu-setup-checks p{margin:5px 0;overflow-wrap:anywhere}
-      .feishu-setup-check-heading{display:flex;gap:12px;justify-content:space-between}.feishu-setup-check-heading span{flex-shrink:0;color:var(--dsw-alias-label-secondary,#686a70)}
+      .feishu-diagnostics{margin-top:14px;padding-top:4px;border-top:1px solid var(--dsw-alias-border-l2,#ddd)}
+      .feishu-diagnostic-checks{list-style:none;padding:0 4px 0 0;margin:12px 0;max-height:420px;overflow:auto;overscroll-behavior:contain}.feishu-diagnostic-checks>li{padding:12px 0;border-top:1px solid var(--dsw-alias-border-l2,#ddd)}.feishu-diagnostic-checks p{margin:5px 0;overflow-wrap:anywhere}
+      .feishu-diagnostic-check-heading{display:flex;gap:12px;justify-content:space-between}.feishu-diagnostic-check-heading span{flex-shrink:0;color:var(--dsw-alias-label-secondary,#686a70)}
       .feishu-field{display:flex;flex-direction:column;gap:6px;margin:14px 0}.feishu-settings label{font-weight:500}
       .feishu-settings input,.feishu-settings select,.feishu-settings textarea{width:100%;min-width:0;border:1px solid var(--dsw-alias-border-l4,#ccc);border-radius:8px;background:var(--dsw-alias-bg-layer-3,#fff);color:inherit;padding:9px 11px;font:inherit}
       .feishu-settings textarea{resize:vertical}
@@ -648,11 +625,11 @@ window.__ModuleLoader__.load({
       .feishu-state-banner.is-error::before,.feishu-state-banner.is-attention::before{content:'!'}
       .feishu-state-banner.is-attention{--feishu-state-color:var(--dsw-alias-state-warn-label,#b36b00)}
       .feishu-state-banner.is-success{--feishu-state-color:var(--dsw-alias-state-success-primary,#258047)}.feishu-state-banner.is-success::before{content:'✓'}
-      .feishu-setup-checks .feishu-state-badge{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--dsw-alias-border-l4,#ccc);border-radius:999px;padding:2px 8px;font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,#202124)}
+      .feishu-diagnostic-checks .feishu-state-badge{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--dsw-alias-border-l4,#ccc);border-radius:999px;padding:2px 8px;font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,#202124)}
       .feishu-state-badge::before{content:'!';font-weight:700}.feishu-state-badge[data-state=ok]::before{content:'✓'}
-      .feishu-setup-checks .feishu-state-badge[data-state=error]{border-color:var(--dsw-alias-state-error-primary,#d54941);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#d54941) 18%,transparent)}
-      .feishu-setup-checks .feishu-state-badge[data-state=action],.feishu-setup-checks .feishu-state-badge[data-state=warning]{border-color:var(--dsw-alias-state-warn-label,#b36b00);background:color-mix(in srgb,var(--dsw-alias-state-warn-label,#b36b00) 12%,transparent)}
-      .feishu-setup-checks .feishu-state-badge[data-state=ok]{border-color:var(--dsw-alias-state-success-primary,#258047);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#258047) 12%,transparent)}
+      .feishu-diagnostic-checks .feishu-state-badge[data-state=error]{border-color:var(--dsw-alias-state-error-primary,#d54941);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#d54941) 18%,transparent)}
+      .feishu-diagnostic-checks .feishu-state-badge[data-state=action],.feishu-diagnostic-checks .feishu-state-badge[data-state=warning]{border-color:var(--dsw-alias-state-warn-label,#b36b00);background:color-mix(in srgb,var(--dsw-alias-state-warn-label,#b36b00) 12%,transparent)}
+      .feishu-diagnostic-checks .feishu-state-badge[data-state=ok]{border-color:var(--dsw-alias-state-success-primary,#258047);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#258047) 12%,transparent)}
       @keyframes feishu-status-spin{to{transform:rotate(360deg)}}@keyframes feishu-status-enter{from{opacity:.5;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}@keyframes feishu-status-attention{0%,100%{box-shadow:0 0 0 0 transparent}45%{box-shadow:0 0 0 4px color-mix(in srgb,var(--feishu-state-color) 20%,transparent)}}
       @media(prefers-reduced-motion:reduce){.feishu-settings button,.feishu-switch span{transition:none}.feishu-settings .feishu-primary:not(:disabled):hover{transform:none}.feishu-state-banner,.feishu-state-banner.is-error,.feishu-state-banner.is-working::before,.feishu-settings button[aria-busy=true]::before{animation:none}}
       .feishu-settings :is(input,select,textarea,button,a):focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4d6bfe);outline-offset:2px}

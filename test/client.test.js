@@ -793,64 +793,73 @@ test('directory field opens only the list; the separate search icon reveals and 
   assert.equal(f.requests.filter(r => r.method === 'POST').length, 0);
 });
 
-test('quick setup validates before saving, uses selected bot repair and never claims end-to-end readiness', async t => {
+
+test('connection diagnostics stay collapsed until requested and never save or start tunnels', async t => {
   const f = await fixture(t);
-  f.edit('appSecret', 'private-setup-secret');
-  const button = f.nodes().find(node => node.type === 'button' && f.text(node) === '保存并一键配置');
-  await button.props.onClick(); await f.settle();
+  const check = () => f.nodes().find(node => node.type === 'button' && f.text(node) === '检查连接问题');
+  assert.doesNotMatch(f.text(), /快速配置|保存并一键配置|检查完成/);
+  assert.equal(check().props['aria-expanded'], false);
+  assert.equal(f.requests.some(item => item.method === 'POST'), false);
+  assert.equal(f.nodes().filter(node => node.type === 'button' && f.text(node) === '保存配置').length, 1);
+  await check().props.onClick(); await f.settle();
   const posts = f.requests.filter(item => item.method === 'POST');
-  assert.deepEqual(posts.map(item => item.url), ['/api/feishu-bot/bots/default/test', '/api/feishu-bot/bots/default/config', '/api/feishu-bot/bots/default/setup/repair']);
-  assert.equal(JSON.parse(posts[0].body).appSecret, 'private-setup-secret');
-  assert.equal(posts[2].body, '{}');
-  assert.equal(f.field('appSecret').props.value, '');
+  assert.deepEqual(posts.map(item => item.url), ['/api/feishu-bot/bots/default/setup/check']);
+  assert.equal(posts[0].body, '{}');
+  assert.equal(check().props['aria-expanded'], true);
   assert.match(f.text(), /1 项通过，1 项需要处理或确认/);
   assert.match(f.text(), /实际收发仍需验收/);
-  assert.equal(f.field('setup-callback').props.value, 'https://example.ngrok.app/webhook/feishu/default');
-  assert.ok(f.nodes().some(node => node.type === 'a' && node.props.href === 'https://open.feishu.cn/app'));
+  await f.nodes().find(node => node.type === 'button' && f.text(node) === '收起检查结果').props.onClick();
+  await f.settle();
+  assert.equal(check().props['aria-expanded'], false);
+  assert.doesNotMatch(f.text(), /检查完成/);
+  assert.equal(f.requests.filter(item => item.method === 'POST').length, 1);
 });
 
-test('failed quick-setup credential validation keeps drafts and never saves or starts a tunnel', async t => {
+test('unsaved edits disable diagnostics and preserve credentials until the normal save action', async t => {
   const f = await fixture(t);
   f.edit('appSecret', 'draft-secret');
-  f.fail('test', '飞书应用认证未通过');
-  await f.nodes().find(node => node.type === 'button' && f.text(node) === '保存并一键配置').props.onClick();
-  await f.settle();
+  const check = f.nodes().find(node => node.type === 'button' && f.text(node) === '检查连接问题');
+  assert.equal(check.props.disabled, true);
   assert.equal(f.field('appSecret').props.value, 'draft-secret');
-  assert.deepEqual(f.requests.filter(item => item.method === 'POST').map(item => item.url), ['/api/feishu-bot/bots/default/test']);
-  assert.match(f.text(), /飞书应用认证未通过/);
-  assert.doesNotMatch(f.text(), /检查完成/);
+  assert.match(f.text(), /请先保存配置，再检查连接问题/);
+  assert.equal(f.requests.some(item => item.method === 'POST'), false);
+  f.nodes().find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+  await f.settle();
+  assert.equal(f.nodes().find(node => node.type === 'button' && f.text(node) === '检查连接问题').props.disabled, false);
+  assert.equal(f.requests.some(item => item.url.endsWith('/setup/repair')), false);
 });
 
-test('rechecking is read-only, hides stale results on edit, and never renders unsafe action links', async t => {
+test('diagnostics hide stale results on edit and never render unsafe action links', async t => {
   const f = await fixture(t, {}, { setupReport: { ready: false, checks: [
     { id: 'unsafe', title: '外部内容', state: 'action', message: '<script>not HTML</script>', action: { label: 'bad link', url: 'javascript:alert(1)' } },
   ] } });
-  const recheck = () => f.nodes().find(node => node.type === 'button' && f.text(node) === '重新检查');
-  assert.equal(recheck().props.disabled, false);
-  await recheck().props.onClick(); await f.settle();
-  assert.equal(f.requests.filter(item => item.method === 'POST').length, 1);
-  assert.ok(f.requests.some(item => item.url.endsWith('/setup/check')));
+  await f.nodes().find(node => node.type === 'button' && f.text(node) === '检查连接问题').props.onClick(); await f.settle();
   assert.equal(f.nodes().some(node => node.type === 'a' && node.props.href?.startsWith('javascript:')), false);
   assert.equal(f.nodes().some(node => node.type === 'script'), false);
   assert.match(f.text(), /检查完成/);
   f.edit('connectionMode', 'websocket');
-  assert.equal(recheck().props.disabled, true);
-  assert.doesNotMatch(f.text(), /检查完成/);
+  assert.doesNotMatch(f.text(), /检查完成|收起检查结果/);
 });
 
-test('quick setup uses an additional bot scope and recheck does not repeat repair after an error', async t => {
+test('diagnostic errors can be retried within the selected bot without saving or repair calls', async t => {
   const f = await fixture(t, {}, { bots: [{ id: 'project-b', name: '项目 B', enabled: true }] });
-  f.nodes().find(node => node.type === 'select' && node.props.id === 'feishu-test-bot').props.onChange({ target: { value: 'project-b' } });
-  await f.settle();
-  f.fail('bots/project-b/setup/repair', '检查暂不可用');
-  await f.nodes().find(node => node.type === 'button' && f.text(node) === '保存并一键配置').props.onClick();
-  await f.settle();
+  f.field('bot').props.onChange({ target: { value: 'project-b' } }); await f.settle();
+  const check = () => f.nodes().find(node => node.type === 'button' && f.text(node) === '检查连接问题');
+  f.fail('bots/project-b/setup/check', '检查暂不可用');
+  await check().props.onClick(); await f.settle();
   assert.match(f.text(), /检查暂不可用/);
-  assert.ok(f.requests.some(item => item.url === '/api/feishu-bot/bots/project-b/config' && item.method === 'POST'));
-  f.fail('bots/project-b/setup/repair', '');
-  await f.nodes().find(node => node.type === 'button' && f.text(node) === '重新检查').props.onClick();
-  await f.settle();
-  assert.equal(f.requests.filter(item => item.url.endsWith('/setup/repair')).length, 1);
-  assert.ok(f.requests.some(item => item.url === '/api/feishu-bot/bots/project-b/setup/check'));
-  assert.equal(f.requests.some(item => item.url.includes('bots/default/setup')), false);
+  f.fail('bots/project-b/setup/check', '');
+  await check().props.onClick(); await f.settle();
+  assert.match(f.text(), /检查完成/);
+  assert.deepEqual(f.requests.filter(item => item.method === 'POST').map(item => item.url), ['/api/feishu-bot/bots/project-b/setup/check', '/api/feishu-bot/bots/project-b/setup/check']);
+});
+
+test('connection failures are prominent without automatically opening or running diagnostics', async t => {
+  const f = await fixture(t, { connectionMode: 'websocket' });
+  f.setRuntime({ mode: 'websocket', state: 'error', message: '连接已断开' });
+  const [id, poll] = [...f.timers][0]; f.timers.delete(id); await poll(); await f.settle();
+  assert.ok(f.nodes().some(node => node.props.className === 'feishu-state-banner is-error' && /当前运行/.test(f.text(node))));
+  assert.match(f.text(), /查看具体待办/);
+  assert.equal(f.requests.some(item => item.method === 'POST'), false);
+  assert.doesNotMatch(f.text(), /检查完成/);
 });

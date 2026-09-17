@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { findHarnessEntry } from './harness-entry.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const nextStep = 'Settings → Plugins → Plugin list → 飞书机器人 → 快速配置 → 保存并一键配置';
+const nextStep = 'Settings → Plugins → Plugin list → 飞书机器人';
 
 export function checkNodeVersion(version = process.versions.node) {
   const [major, minor] = version.split('.').map(Number);

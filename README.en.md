@@ -42,7 +42,7 @@ Current multi-bot settings captured in an isolated test instance, showing select
 | Automatic replies | Replies to the original message with the Agent's final text; splits long replies into multiple messages |
 | Webhook verification | Handles URL verification, Verification Token checks, encrypted payload decryption, and signature verification |
 | Public endpoints | Webhook supports ngrok, Cloudflare Tunnel, or a custom HTTPS address; ngrok / Cloudflare can be launched and supervised from the panel |
-| Quick setup | Saves and checks credentials, project directory and connection settings; attempts to start a configured managed tunnel and lists results and Feishu console actions |
+| Connection diagnostics | Inspect saved credentials, the project and connection settings on demand; does not save settings or start tunnels |
 | Connection checks | Tests application credentials, displays WebSocket connection status, and detects local ngrok tunnels |
 | User access | Feishu app availability controls access; each user must provide and confirm a name before tasks, with no prefilled `open_id` or name list |
 | User isolation | Separate user workspaces and SQLite databases, with separate context per chat; identical names do not merge data |
@@ -140,9 +140,9 @@ Enter your App ID, App Secret, and Agent preset. In **任务处理**, click **�
 | Feishu console subscription method | Send events to a developer server | Receive events through a persistent connection |
 | Selection | Default mode | Select in the settings page and save |
 
-After filling in the fields required by your chosen mode, click **保存并一键配置** (Save and configure) in the card’s **快速配置** (Quick setup) section. The plugin saves your settings, checks credentials, the project directory and connection settings, and attempts to start a configured ngrok or Cloudflare managed tunnel. Results include links to the remaining Feishu console actions. Your selected transport is preserved; WebSocket setup requires no tunnel. Advanced settings remain available.
+Fill in the fields required by your selected mode and click **保存配置** (Save settings). The panel normally shows connection status, with prominent alerts for problems. Click **检查连接问题** (Check connection issues) under the transport settings to expand diagnostics; **收起检查结果** hides them again. Checks use saved settings and do not save drafts, start tunnels or send test messages. Existing tunnel controls remain available.
 
-Complete any missing settings and the Feishu console steps, then click **重新检查** (Check again). Administrators still create the Feishu app, grant permissions, publish its version, install tunnel binaries and purchase or fund external services. Passing these checks does not replace a real message-and-reply test.
+Administrators still create the Feishu app, grant permissions, publish its version, install tunnel binaries and purchase or fund external services. Diagnostic results do not replace a real message-and-reply test.
 
 Both modes require subscribing to **Receive message (`im.message.receive_v1`)**, granting permission to receive and reply to messages, and completing Feishu's app version publishing/activation process.
 
