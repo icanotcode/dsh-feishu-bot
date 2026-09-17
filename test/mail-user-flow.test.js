@@ -147,27 +147,21 @@ test('explicit SMTP configuration supports arbitrary hosts and ports for TLS and
   }
 });
 
-test('legacy pending states require explicit SMTP configuration without dropping the email', async () => {
-  const app = fixture();
-  await app.handle('/mail');
-  const ref = [...app.values.keys()][0];
-  app.values.set(ref, { source: 'store', value: JSON.stringify({ version: 1, stage: 'awaiting_code', chatId: 'private-a', email: '123456@qq.com', updatedAt: '2026-01-01T00:00:00.000Z' }) });
-  const calls = [];
-  const restarted = createMailUserFlow(app.ctx, { verify: async (...args) => { calls.push(args); } });
-  const handle = (text, extra = {}) => restarted.handle(alice, { text, chatId: 'private-a', chatType: 'p2p', ...extra });
-  assert.equal((await restarted.getStatus(alice)).stage, 'awaiting_code');
-  assert.deepEqual(await restarted.getIngressState(alice), { stage: 'awaiting_code', chatId: 'private-a' });
-  assert.match((await handle('pure-legacy-authorization', { secret: 'pure-legacy-authorization' })).reply, /\/mail server/);
-  assert.match((await handle('/mail code [removed]', { secret: 'do-not-use-yet' })).reply, /\/mail server/);
-  assert.equal(calls.length, 0);
-  assert.doesNotMatch(JSON.stringify([...app.values]), /do-not-use-yet/);
-  assert.doesNotMatch(JSON.stringify([...app.values]), /pure-legacy-authorization/);
-  await handle('/mail server smtp.qq.com 465 tls');
-  assert.equal((await restarted.getStatus(alice)).email, '123456@qq.com');
-  const result = await handle('/mail code [removed]', { secret: 'new-authorization' });
-  assert.match(result.reply, /邮箱验证成功/);
-  assert.equal(calls[0][0].host, 'smtp.qq.com');
-  assert.equal((await restarted.getStatus(alice)).stage, 'awaiting_recipient');
+test('legacy pending states auto-select known providers before ingress intercepts the authorization code', async () => {
+  for (const stage of ['awaiting_server', 'awaiting_code']) {
+    const app = fixture();
+    await app.handle('/mail');
+    const ref = [...app.values.keys()][0];
+    app.values.set(ref, { source: 'store', value: JSON.stringify({ version: 1, stage, chatId: 'private-a', email: '123456@QQ.COM' }) });
+    const calls = [];
+    const restarted = createMailUserFlow(app.ctx, { verify: async (...args) => { calls.push(args); } });
+    assert.deepEqual(await restarted.getIngressState(alice), { stage: 'awaiting_code', chatId: 'private-a' });
+    assert.equal((await restarted.getStatus(alice)).email, '123456@QQ.COM');
+    const result = await restarted.handle(alice, { text: '/mail code', secret: 'new-authorization', chatId: 'private-a', chatType: 'p2p' });
+    assert.match(result.reply, /邮箱验证成功/);
+    assert.equal(calls[0][0].host, 'smtp.qq.com');
+    assert.equal((await restarted.getStatus(alice)).stage, 'awaiting_recipient');
+  }
 });
 
 test('legacy verified accounts retain their prior endpoint until explicitly reconfigured', async () => {
@@ -365,4 +359,106 @@ test('aborting while checking writable credentials prevents the state mutation',
   app.ctx.credentials.resolve = async () => { if (++reads === 2) controller.abort(); return undefined; };
   await assert.rejects(app.handle('/mail', { signal: controller.signal }), { name: 'AbortError' });
   assert.equal(app.values.size, 0);
+});
+
+test('known sender skips server questions while manual SMTP always overrides detection', async () => {
+  const app = fixture();
+  await app.handle('/mail');
+  const selected = await app.handle('sender@foxmail.com');
+  assert.match(selected.reply, /自动选择/);
+  assert.match(selected.reply, /smtp.qq.com/);
+  assert.match(selected.reply, /授权码/);
+  assert.doesNotMatch(selected.reply, /mail server/);
+  assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_code');
+  await app.handle('/mail server mail.custom.example 587 starttls');
+  await app.handle('/mail code', { secret: 'test-code' });
+  assert.equal(app.verified[0][0].host, 'mail.custom.example');
+});
+
+test('original send request resumes once after verification when the recipient is already known', async () => {
+  const app = fixture();
+  const request = { messageId: 'original-message', requestText: '发送项目进度邮件给 receiver@example.com，主题进度，正文已完成。', recipient: 'receiver@example.com' };
+  await app.handle('/mail setup', { pendingRequest: request });
+  await app.handle('sender@qq.com');
+  assert.equal(await app.flow.getAccount(alice), null);
+  const result = await app.handle('/mail code', { secret: 'verified-code' });
+  assert.deepEqual(result.resume, { messageId: request.messageId, requestText: request.requestText });
+  assert.equal((await app.flow.getAccount(alice)).recipient, 'receiver@example.com');
+  assert.doesNotMatch(JSON.stringify(result), /verified-code/);
+  assert.doesNotMatch(JSON.stringify([...app.values]), /pendingRequest|original-message|项目进度/);
+  assert.equal((await app.handle('/mail code', { secret: 'repeat-code' })).resume, undefined);
+  assert.equal(app.verified.length, 1);
+});
+
+test('pending send survives manual server selection and restart until a valid recipient is provided', async () => {
+  for (const recipientInput of ['recipient@example.com', '/mail to recipient@example.com']) {
+    const app = fixture();
+    const request = { messageId: 'original-message', requestText: '请发邮件：主题测试，正文内容。' };
+    await app.handle('/mail setup', { pendingRequest: request });
+    await app.handle('sender@company.example');
+    await app.handle('/mail server mail.company.example 465 tls');
+    assert.equal((await app.handle('/mail code', { secret: 'verified-code' })).resume, undefined);
+    const restarted = createMailUserFlow(app.ctx);
+    const handle = text => restarted.handle(alice, { text, chatId: 'private-a', chatType: 'p2p' });
+    assert.equal((await handle('invalid mailbox')).resume, undefined);
+    assert.equal((await restarted.getStatus(alice)).stage, 'awaiting_recipient');
+    assert.deepEqual((await handle(recipientInput)).resume, request);
+    assert.equal((await handle(recipientInput)).resume, undefined);
+    assert.doesNotMatch(JSON.stringify([...app.values]), /pendingRequest|original-message/);
+  }
+});
+
+test('verification failure keeps the request pending and cross-chat access cannot consume it', async () => {
+  let fails = true;
+  const app = fixture({ verify: async () => { if (fails) throw new Error('private-auth-secret'); } });
+  const request = { messageId: 'original-message', requestText: '发送指定报告邮件。', recipient: 'recipient@example.com' };
+  await app.handle('/mail setup', { pendingRequest: request });
+  await app.handle('sender@qq.com');
+  assert.equal((await app.handle('/mail code', { secret: 'private-code' })).resume, undefined);
+  assert.equal((await app.flow.getStatus(alice)).stage, 'awaiting_code');
+  assert.match(JSON.stringify([...app.values]), /original-message/);
+  assert.doesNotMatch(JSON.stringify([...app.values]), /private-code|private-auth-secret/);
+  const otherChat = await app.handle('/mail code', { secret: 'private-code', chatId: 'private-other' });
+  assert.equal(otherChat.resume, undefined);
+  assert.doesNotMatch(JSON.stringify(otherChat), /报告|original-message|recipient@example/);
+  fails = false;
+  assert.deepEqual((await app.handle('/mail code', { secret: 'verified-code' })).resume, { messageId: request.messageId, requestText: request.requestText });
+});
+
+test('cancel, reset and manual setup discard pending send and manual binding never resumes', async () => {
+  for (const command of ['/mail cancel', '/mail reset', '/mail', '/mail setup']) {
+    const app = fixture();
+    await app.handle('', { requireSetup: true, pendingRequest: { messageId: 'old-message', requestText: '发送之前的请求。', recipient: 'old@example.com' } });
+    await app.handle('sender@qq.com');
+    await app.handle(command);
+    assert.doesNotMatch(JSON.stringify([...app.values]), /old-message|old@example.com|pendingRequest/);
+    await app.handle('/mail');
+    await app.handle('sender@qq.com');
+    assert.equal((await app.handle('/mail code', { secret: 'verified-code' })).resume, undefined);
+    assert.equal((await app.handle('recipient@example.com')).resume, undefined);
+  }
+});
+
+test('malformed or secret-bearing pending request metadata fails closed', async () => {
+  for (const pendingRequest of [
+    null, {}, { messageId: '', requestText: 'send mail' },
+    { messageId: 'msg', requestText: '/mail code private-code' },
+    { messageId: 'msg', requestText: 'send mail', password: 'private-code' },
+    { messageId: 'msg', requestText: 'send mail', recipient: 'a@example.com,b@example.com' },
+    { messageId: 'msg', requestText: 'x'.repeat(64001) },
+  ]) {
+    const app = fixture();
+    const result = await app.handle('', { requireSetup: true, pendingRequest });
+    assert.match(result.reply, /凭据服务/);
+    assert.doesNotMatch(JSON.stringify(result), /private-code/);
+    assert.equal(app.values.size, 0);
+  }
+  const app = fixture();
+  await app.handle('/mail');
+  const ref = [...app.values.keys()][0];
+  const stored = JSON.parse(app.values.get(ref).value);
+  stored.pendingRequest = { messageId: 'msg', requestText: '/mail code private-code' };
+  app.values.set(ref, { source: 'store', value: JSON.stringify(stored) });
+  assert.match((await app.handle('sender@qq.com')).reply, /凭据服务/);
+  await assert.rejects(app.flow.getIngressState(alice), /凭据服务/);
 });

@@ -23,7 +23,7 @@ async function fixture(t, options = {}) {
     const agent = app.agents.get(app.store(user).getCurrentSession(chatId).sessionId);
     await app.claim(agent); return agent;
   }
-  return { ...app, setup, active, execute, secrets, sends, verifications, flow };
+  return Object.assign(app, { setup, active, execute, secrets, sends, verifications, flow });
 }
 
 test('ordinary messages load the skill without requiring a mailbox; natural email requests can start isolated setup', async t => {
@@ -108,4 +108,81 @@ test('uncertain SMTP results stay deduplicated across runtime restart and never 
   const result = await bridge.execute('feishu_send_email', args, { identity: { source: 'test', tenantId: 'tenant', openId: 'alice' }, store: f.store(), sessionId: current.sessionId, chatId: 'chat-a', workspacePath: agent.session.header.cwd },
     { messageId: 'email-message', turn: 'replay', chatType: 'p2p' }, { signal: new AbortController().signal, checkActive() {} });
   assert.deepEqual(result, first.data); assert.equal(f.sends.length, 1);
+});
+
+test('automatic provider setup resumes the original send request after credentials, including across restart', async t => {
+  const f = await fixture(t);
+  const original = '请发邮件到 target@example.com，主题 Meeting，正文 Tomorrow at ten.';
+  const initial = await f.active('alice', 'chat-a', original, 'original-send-request');
+  await f.execute('feishu_mail_setup', initial, { resumeSend: true, recipient: 'target@example.com' });
+  await f.finish(initial);
+  await f.send({ text: 'alice@qq.com' });
+  assert.match(f.replies.at(-1)[1], /授权码/);
+  assert.equal(f.verifications.length, 0);
+  await f.restart();
+  await f.send({ text: '/mail code private-test-code', messageId: 'code-completes-setup' });
+  assert.equal(f.verifications[0][0].host, 'smtp.qq.com');
+  assert.equal(f.verifications[0][0].port, 465);
+  const agent = f.agents.get(f.store().getCurrentSession('chat-a').sessionId);
+  assert.equal(agent.queue.length, 1);
+  const queued = JSON.stringify(agent.queue);
+  assert.ok(queued.includes(original));
+  assert.match(queued, /继续本次绑定前用户明确提出的发送任务/);
+  assert.doesNotMatch(queued, /private-test-code/);
+  assert.deepEqual(f.store().searchMessages({ query: 'private-test-code' }), []);
+  await f.claim(agent);
+  const args = { subject: 'Meeting', text: 'Tomorrow at ten.' };
+  const result = await f.execute('feishu_send_email', agent, args);
+  assert.equal(result.data.status, 'accepted');
+  assert.equal(f.sends.length, 1);
+  assert.deepEqual(f.sends[0][2].to, ['target@example.com']);
+  await f.finish(agent);
+  // A repeated code must not resume or send the task a second time.
+  await f.send({ text: '/mail code private-test-code', messageId: 'code-repeated' });
+  assert.equal(agent.queue.length, 0);
+  assert.equal(f.sends.length, 1);
+  // An original-turn retry shares the persisted ledger with the resumed turn.
+  const { createMailBridge } = await import('../lib/mail-bridge.js');
+  const bridge = createMailBridge(f.ctx, f.config, { flow: f.flow, send: async () => assert.fail('duplicate send') });
+  const replay = await bridge.execute('feishu_send_email', args,
+    { identity: { source: 'test', tenantId: 'tenant', openId: 'alice' }, store: f.store(), sessionId: agent.session.id, chatId: 'chat-a', workspacePath: agent.session.header.cwd },
+    { messageId: 'original-send-request', turn: 'retry', chatType: 'p2p' }, { signal: new AbortController().signal, checkActive() {} });
+  assert.deepEqual(replay, result.data);
+});
+
+test('missing recipient is asked once and completing it continues only that user’s original task', async t => {
+  const f = await fixture(t);
+  const initial = await f.active('alice', 'chat-a', '请发邮件，主题 Hello，正文 Alice only.');
+  await f.execute('feishu_mail_setup', initial, { resumeSend: true });
+  await f.finish(initial);
+  await f.send({ text: 'alice@163.com' });
+  await f.send({ text: 'private-alice-code' });
+  assert.match(f.replies.at(-1)[1], /收件邮箱/);
+  assert.equal(initial.queue.length, 0);
+  await f.send({ text: 'bob@example.com', senderId: 'bob', chatId: 'chat-b' });
+  assert.equal(initial.queue.length, 0);
+  await f.send({ text: '/mail to target@example.com' });
+  assert.equal(initial.queue.length, 1);
+  assert.match(JSON.stringify(initial.queue), /Alice only/);
+  assert.doesNotMatch(JSON.stringify(initial.queue), /private-alice-code/);
+  await f.claim(initial);
+  await f.execute('feishu_send_email', initial, { subject: 'Hello', text: 'Alice only.' });
+  assert.equal(f.sends[0][0].host, 'smtp.163.com');
+  assert.equal(f.sends[0][0].from, 'alice@163.com');
+  assert.deepEqual(f.sends[0][2].to, ['target@example.com']);
+});
+
+test('manual mailbox setup and cancelled send setup do not enqueue automatic sending', async t => {
+  const f = await fixture(t);
+  const initial = await f.active('alice', 'chat-a', '请发邮件给 target@example.com，主题 Old，正文 Cancelled.');
+  await f.execute('feishu_mail_setup', initial, { resumeSend: true, recipient: 'target@example.com' });
+  await f.finish(initial);
+  await f.send({ text: 'alice@qq.com' });
+  await f.send({ text: '/mail cancel' });
+  await f.send({ text: '/mail' });
+  await f.send({ text: 'alice@qq.com' });
+  await f.send({ text: '/mail code new-private-code' });
+  await f.send({ text: 'new-target@example.com' });
+  assert.equal(initial.queue.length, 0);
+  assert.equal(f.sends.length, 0);
 });
