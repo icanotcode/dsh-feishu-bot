@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 新增技能能力桥：隔离会话新增 `feishu_capability` 工具（list/load/run），插件在每条消息中按用户角色注入可见能力清单；自动扫描 Harness 用户级技能目录（`~/.dsh/skills/`），技能放置后即被发现的——无 `feishu.json` 声明的技能以只读说明（load-only）按默认角色开放并附加隔离限制提醒，声明 `feishu.json` 可自定义角色、指令文件（默认 `FEISHU.md`）与可执行命令模板；声明 `{ "enabled": false }` 可完全隐藏。命令以 argv 数组执行（不经 shell），参数按声明正则校验，单次执行限时 15 秒、输出限 8000 字符，指令文件路径限定在技能目录内。用户角色在机器人配置的 `authorizedUsers[].roles` 中声明，未声明角色的用户不可见任何能力；`capabilityDefaultRoles` 控制无声明技能的默认开放角色（默认 `["admin"]`）。
+
 - 修复深色主题主按钮白底白字，采用配套主题前景色；连接检查新增加载转圈、结果提示条和状态徽标，错误短暂强调，尊重系统减少动态效果设置。
 
 - 新增跨平台管理员入口 `npm run setup:harness`：检查 Node.js 与 Harness，复用幂等安装脚本后启动；端口占用时不终止现有服务，也不误报插件已配置完成。

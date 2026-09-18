@@ -38,6 +38,7 @@ Current multi-bot settings captured in an isolated test instance, showing select
 | Messages and attachments | Receives text, rich text (`post`), images, files, video, and audio through `im.message.receive_v1`; reuses the current session for the same tenant, user, and chat |
 | File replies and image reading | Sends files or media from the user workspace to the current message; models declaring image input can inspect older images |
 | Personal email sending | Enter your mailbox in a direct chat, let the Agent discover SMTP settings, verify your authorization code, and continue the current send request; workspace attachments supported; no inbox access |
+| Skill capability bridge | Auto-discovers skills in `~/.dsh/skills/` and grants them to Feishu sessions per user role: the `feishu_capability` tool lists granted capabilities, loads their instructions, and runs their declared commands; skills without a manifest are exposed read-only under default roles, while a `feishu.json` manifest configures roles and command templates |
 | Working indicator | Adds a `Typing` reaction to the original message when processing starts and attempts to remove it when processing ends; reaction failures do not block the task or reply |
 | Automatic replies | Replies to the original message with the Agent's final text; splits long replies into multiple messages |
 | Webhook verification | Handles URL verification, Verification Token checks, encrypted payload decryption, and signature verification |
