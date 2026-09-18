@@ -8,7 +8,7 @@
 
 简体中文 · [English](README.en.md)
 
-[快速开始](#快速开始) · [飞书接入指南](docs/setup.md) · [常见问题](docs/troubleshooting.md) · [反馈问题](https://github.com/icanotcode/dsh-feishu-bot/issues)
+[快速开始](#快速开始) · [飞书接入指南](docs/setup.md) · [能力桥接入指南](docs/capability-bridge.md) · [常见问题](docs/troubleshooting.md) · [反馈问题](https://github.com/icanotcode/dsh-feishu-bot/issues)
 
 ## 简介
 

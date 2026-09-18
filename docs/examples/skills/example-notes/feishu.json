@@ -1,0 +1,20 @@
+{
+  "enabled": true,
+  "roles": ["admin", "member"],
+  "summary": "示例便签能力：检索与记录团队便签",
+  "instructions": "FEISHU.md",
+  "commands": {
+    "search": {
+      "argv": ["python3", "scripts/notes.py", "search", "{query}"],
+      "args": { "query": "[\\s\\S]{1,200}" },
+      "description": "按关键词检索便签"
+    },
+    "add": {
+      "argv": ["python3", "scripts/notes.py", "add"],
+      "stdin": "{json}",
+      "args": { "json": "[\\s\\S]{2,4000}" },
+      "roles": ["admin"],
+      "description": "新增便签（仅管理员）"
+    }
+  }
+}
