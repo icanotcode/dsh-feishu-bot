@@ -138,7 +138,7 @@ Harness 的 Web 会话拥有 `skill` 工具与自动注入的技能目录（avai
 | 全局紧急关闭某能力 | `feishu.json` 设 `enabled: false` |
 
 新用户审批流：姓名确认后仍无角色的用户，插件会主动向全部管理员私聊推送审批请求；
-管理员用 `/approve <open_id> <角色>` 批准、`/reject <open_id>` 拒绝、`/pending` 查看待审批列表；
+管理员直接用自然语言（如「批准张三为普通用户」）由 Agent 调 `feishu_approval` 工具完成，或使用斜杠命令 `/approve`、`/reject`、`/pending`；
 批准即时生效并写回配置文件，用户自动收到开通通知。审批命令仅 `admin` 角色可用。
 
 角色层级（三级）：
