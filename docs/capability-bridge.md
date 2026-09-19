@@ -111,6 +111,35 @@ Harness 的 Web 会话拥有 `skill` 工具与自动注入的技能目录（avai
 - 未配置 `roles` 的用户看不到任何能力；
 - 能力级与命令级角色可叠加收紧（例如读命令开放给 member，写命令仅 admin）。
 
+## 权限模型（RBAC-lite）
+
+```
+主体：飞书用户（openId，姓名确认后）
+  ↓ 拥有
+角色：字符串标签（admin / member / 自定义领域角色）
+  ↓ 匹配
+客体：能力（feishu.json 的 roles）+ 命令级收紧（commands.x.roles）
+```
+
+三条回退规则（默认姿态）：
+
+1. 用户未配置角色 → 回退 `defaultUserRoles`（默认 `[]`，即什么都看不到，
+   须管理员显式授予）；
+2. 技能未声明 `feishu.json` → 回退 `capabilityDefaultRoles`（默认 `["admin"]`）；
+3. 命令未声明角色 → 跟随能力级角色。
+
+增 / 减权限的四个操作点（均即时生效，逐消息现读）：
+
+| 操作 | 位置 |
+|---|---|
+| 给某用户开通 / 收回一类能力 | 配置中该用户的 `roles` 增删角色 |
+| 调整某技能开放范围 | 该技能 `feishu.json` 的 `roles` |
+| 单命令收紧（如读开放、写仅管理员） | `commands.<name>.roles` |
+| 全局紧急关闭某能力 | `feishu.json` 设 `enabled: false` |
+
+角色语义约定：`admin` = 所有者全量；`member` = 普通授权用户；
+领域角色（如 `xxx-user`）用于按技能粒度发放。
+
 ## 开放决策树（建议固化为团队规则）
 
 新增技能时，按顺序判断并把决定**显式写进 `feishu.json`**：

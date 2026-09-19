@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 能力桥权限模型完善：新增 `defaultUserRoles`（姓名确认但未列入授权用户的默认角色，默认空即不可见任何能力）；修复 `roles` 与 `capabilityDefaultRoles` 被配置 schema 剥离导致授权静默失效的问题；设置保存链路同步保留并校验角色字段。
+
 - 新增《能力桥接入指南》（docs/capability-bridge.md）：feishu.json 声明参考、无声明自动派生、角色授权、开放决策树与安全模型；附全局 Agent 规则示例（docs/examples/agents-rules.md）与最小能力示例（docs/examples/skills/example-notes/）。
 
 - 新增技能能力桥：隔离会话新增 `feishu_capability` 工具（list/load/run），插件在每条消息中按用户角色注入可见能力清单；自动扫描 Harness 用户级技能目录（`~/.dsh/skills/`），技能放置后即被发现的——无 `feishu.json` 声明的技能以只读说明（load-only）按默认角色开放并附加隔离限制提醒，声明 `feishu.json` 可自定义角色、指令文件（默认 `FEISHU.md`）与可执行命令模板；声明 `{ "enabled": false }` 可完全隐藏。命令以 argv 数组执行（不经 shell），参数按声明正则校验，单次执行限时 15 秒、输出限 8000 字符，指令文件路径限定在技能目录内。用户角色在机器人配置的 `authorizedUsers[].roles` 中声明，未声明角色的用户不可见任何能力；`capabilityDefaultRoles` 控制无声明技能的默认开放角色（默认 `["admin"]`）。
