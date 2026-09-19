@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 新增用户审批流：姓名确认后无角色的新用户会自动向全部管理员私聊推送审批请求；管理员用 `/approve <open_id> <角色>`、`/reject <open_id>`、`/pending` 命令完成审批，结果即时生效并写回配置文件（读-改-写保留其他字段），批准后自动通知用户；审批命令仅管理员可用，同次运行内通知幂等不刷屏。
+
 - 能力桥权限模型完善：新增 `defaultUserRoles`（姓名确认但未列入授权用户的默认角色，默认空即不可见任何能力）；修复 `roles` 与 `capabilityDefaultRoles` 被配置 schema 剥离导致授权静默失效的问题；设置保存链路同步保留并校验角色字段。
 
 - 新增《能力桥接入指南》（docs/capability-bridge.md）：feishu.json 声明参考、无声明自动派生、角色授权、开放决策树与安全模型；附全局 Agent 规则示例（docs/examples/agents-rules.md）与最小能力示例（docs/examples/skills/example-notes/）。
