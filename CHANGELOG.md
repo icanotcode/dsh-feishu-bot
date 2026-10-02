@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- 兼容 DSH 0.2.0 运行时：预设服务 `agentPresets.standingKeyFor` 在 0.2.0 中移除，会话准入改为读取 `resolve()` 返回的 `broken` 标志做前置校验，旧方法存在时保持调用，双运行时均可运行；peerDependencies 放宽为 `*`，版本升级不再触发插件禁用（接口的真实破坏性变更仍会在激活阶段显式报错）。
+
+- 新增隔离会话文档解析工具 `feishu_workspace_extract_text`：服务端调用 poppler pdftotext 提取 PDF 正文（绝对路径数组传参，不经 shell），源文档限 30MB、解析限时 30 秒、返回文本限 10 万字符并支持 maxPages 按页续取；路径复用工作区校验，不支持的格式给出明确提示；消息注入指引同步说明该能力。
+
+- 会话准入失败现在记录完整异常堆栈：写入 Harness 日志与 `~/.dsh/feishu-history/admission-errors.log`，不再只剩泛化提示文案。
+
 - 简化权限模型：撤销分组与矩阵审计功能，回归最简模型——用户角色列表 × 技能 roles 声明，交集即权限；角色纪律收敛为三级固定角色，领域角色仅作例外。
 
 
