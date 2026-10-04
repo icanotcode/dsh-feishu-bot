@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 隔离会话新增云文档与网页读取：`feishu_doc_read` 支持 docx 文档、wiki 知识库节点（自动解析到 docx/sheet/bitable）、电子表格（读第一个工作表前 200 行）、多维表格（前 5 个数据表各 50 条记录），输出封顶 2 万字符；链接令牌必须出现在该用户本聊天中发过的消息里才允许代读，无权限时引导用户把机器人加为文档协作者。`feishu_web_fetch` 抓取公网网页正文（去标签、512KB 上限、15 秒超时），DNS 解析后拦截内网/环回地址，重定向逐跳复核。FeishuClient 新增 `querySheets` 与 `listBitableTables`。
+
 - 兼容 DSH 0.2.0 运行时：预设服务 `agentPresets.standingKeyFor` 在 0.2.0 中移除，会话准入改为读取 `resolve()` 返回的 `broken` 标志做前置校验，旧方法存在时保持调用，双运行时均可运行；peerDependencies 放宽为 `*`，版本升级不再触发插件禁用（接口的真实破坏性变更仍会在激活阶段显式报错）。
 
 - 新增隔离会话文档解析工具 `feishu_workspace_extract_text`：服务端调用 poppler pdftotext 提取 PDF 正文（绝对路径数组传参，不经 shell），源文档限 30MB、解析限时 30 秒、返回文本限 10 万字符并支持 maxPages 按页续取；路径复用工作区校验，不支持的格式给出明确提示；消息注入指引同步说明该能力。
