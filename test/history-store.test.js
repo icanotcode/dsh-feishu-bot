@@ -140,6 +140,11 @@ test('history supports cross-session time and literal keyword searches with chat
   assert.equal(user.searchMessages({ query: 'design' }).length, 3);
   assert.equal(user.searchMessages({ query: 'design', chatId: 'private' }).length, 2);
   assert.equal(user.searchMessages({ query: '100%_' }).length, 1);
+  assert.equal(user.searchMessages({ query: 'design sequel' }).length, 1, 'multi-keyword query ANDs every term');
+  assert.equal(user.searchMessages({ query: 'sequel design' }).length, 1, 'term order does not matter (terms are split, not matched as one substring)');
+  assert.equal(user.searchMessages({ query: 'design group' }).length, 1, 'AND match can span chats unless chatId restricts it');
+  assert.equal(user.searchMessages({ query: 'design missing' }).length, 0, 'a missing term yields no hits');
+  assert.equal(user.searchMessages({ query: '  design   sequel  ' }).length, 1, 'extra whitespace is tolerated');
   assert.equal(user.searchMessages({ from: '2026-01-01T00:00:00Z', to: '2026-01-01T00:00:00Z' }).length, 1);
   assert.equal(user.searchMessages({ sessionId: 'session-1' }).length, 1);
   assert.equal(user.searchMessages({ limit: 1, offset: 1 })[0].text, 'design sequel');
