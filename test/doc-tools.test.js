@@ -72,6 +72,17 @@ test('权限错误映射为可操作的引导话术', async () => {
   );
 });
 
+test('应用缺少 API scope 时映射为管理员开通指引（不误导为文档协作问题）', async () => {
+  const token = 'bascnNOSCOPE00';
+  const raw = 'Feishu API error [99991672]: Access denied. One of the following scopes is required: [bitable:app:readonly, bitable:app, base:table:read].应用尚未开通所需的应用身份权限';
+  const client = stubClient({ async listBitableTables() { throw new Error(raw); } });
+  const binding = bindingWith([{ role: 'user', text: `https://x.feishu.cn/base/${token}` }]);
+  await assert.rejects(
+    () => executeDocTool('feishu_doc_read', { url: `https://x.feishu.cn/base/${token}` }, binding, client),
+    /未开通云文档 API 权限[\s\S]*开放平台[\s\S]*发布/,
+  );
+});
+
 test('不支持的链接与未知工具被拒绝', async () => {
   await assert.rejects(() => executeDocTool('feishu_doc_read', { url: 'https://example.com/foo' }, bindingWith([]), stubClient()), /无法识别/);
   await assert.rejects(() => executeDocTool('nope', {}, bindingWith([]), stubClient()), /Tool unavailable/);
