@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 隔离会话新增公网搜索与海报渲染：`feishu_web_search` 经 DuckDuckGo HTML 端点搜索（标题/链接/摘要最多 8 条，uddg 跳转链接还原，复用 SSRF 防护），配合 `feishu_web_fetch` 形成「搜索→选读」闭环；`feishu_poster_render` 用内置三套专业模板（深蓝商务/发布会金句/清新杂志，1080×1500 画布、槽位插值、全量 HTML 转义）或工作区自有 HTML，经 headless chromium 截图为 2 倍率 PNG 写回工作区——渲染环境断网（host-resolver-rules 全屏蔽）、45 秒超时、临时目录即用即清，chromium 路径可用 FEISHU_POSTER_CHROMIUM 覆盖。
+
 - 云文档读取的错误提示区分两类「无权限」：应用未开通 API scope（99991672 且含 scopes is required）现在明确指向「管理员在开放平台开通权限并发布版本」，并回显缺失的 scope 列表；文档级协作权限不足保持原有分享/跨企业引导，避免把 scope 缺失误判为协作或跨租户问题。
 
 - 文档提取工具扩展格式：`feishu_workspace_extract_text` 新增 Excel(.xlsx) 与 CSV/TSV/纯文本支持——xlsx 由插件内置的纯标准库 Python 脚本解析（scripts/xlsx-to-text.py，解析 sharedStrings 与工作表 XML，每表限 1000 行），文本类直接读取并自动剥除 UTF-8/UTF-16 BOM；权限提示与消息指引补充跨企业场景说明（外部企业文档平台禁止授权外部机器人，直接引导导出文件发送或粘贴内容，不反复重试链接）。

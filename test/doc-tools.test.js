@@ -140,3 +140,36 @@ test('网页抓取：重定向目标同样做内网校验', async () => {
     /内网或环回/,
   );
 });
+
+// ===== 公网搜索 =====
+
+const DDG_HTML = `
+<div class="result">
+  <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fcase.example.com%2Faltschool&amp;rut=abc">AltSchool 失败复盘 &amp; 教训</a>
+  <a class="result__snippet" href="#"> AltSchool 烧了 1.7 亿美金后的三点启示……</a>
+</div>
+<div class="result">
+  <a class="result__a" href="https://direct.example.com/report">教育行业报告</a>
+</div>`;
+
+test('公网搜索：解析 DuckDuckGo 结果并还原跳转链接', async () => {
+  const fetchFn = async url => {
+    assert.match(String(url), /html\.duckduckgo\.com/);
+    return response({ headers: { 'content-type': 'text/html' }, body: DDG_HTML });
+  };
+  const out = await executeDocTool('feishu_web_search', { query: 'AltSchool 案例' }, bindingWith([]), stubClient(), { fetchFn, lookupFn: publicLookup });
+  assert.equal(out.results.length, 2);
+  assert.equal(out.results[0].url, 'https://case.example.com/altschool');
+  assert.match(out.results[0].title, /AltSchool 失败复盘 & 教训/);
+  assert.match(out.results[0].snippet, /1.7 亿美金/);
+  assert.equal(out.results[1].url, 'https://direct.example.com/report');
+});
+
+test('公网搜索：参数校验与空结果', async () => {
+  await assert.rejects(() => executeDocTool('feishu_web_search', { query: 'x' }, bindingWith([]), stubClient(), { lookupFn: publicLookup }), /2-200/);
+  await assert.rejects(() => executeDocTool('feishu_web_search', { query: 'abc', count: 9 }, bindingWith([]), stubClient(), { lookupFn: publicLookup }), /1-8/);
+  const fetchFn = async () => response({ headers: { 'content-type': 'text/html' }, body: '<html>no results</html>' });
+  const out = await executeDocTool('feishu_web_search', { query: 'abcdefgh' }, bindingWith([]), stubClient(), { fetchFn, lookupFn: publicLookup });
+  assert.deepEqual(out.results, []);
+  assert.match(out.note, /换一组关键词/);
+});
