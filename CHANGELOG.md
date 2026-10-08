@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 文档提取工具扩展格式：`feishu_workspace_extract_text` 新增 Excel(.xlsx) 与 CSV/TSV/纯文本支持——xlsx 由插件内置的纯标准库 Python 脚本解析（scripts/xlsx-to-text.py，解析 sharedStrings 与工作表 XML，每表限 1000 行），文本类直接读取并自动剥除 UTF-8/UTF-16 BOM；权限提示与消息指引补充跨企业场景说明（外部企业文档平台禁止授权外部机器人，直接引导导出文件发送或粘贴内容，不反复重试链接）。
+
 - 修复历史检索多关键词落空：`searchMessages` 的 query 过去按整串连续子串匹配，Agent 用「学徒班 真实项目」这类组合词搜索时必然 0 命中并被误判为"没有历史记录"；现按空白分词逐词 AND 匹配（词序无关，单词查询行为不变），工具描述同步引导使用 1-3 个特征关键词。
 
 - 隔离会话新增云文档与网页读取：`feishu_doc_read` 支持 docx 文档、wiki 知识库节点（自动解析到 docx/sheet/bitable）、电子表格（读第一个工作表前 200 行）、多维表格（前 5 个数据表各 50 条记录），输出封顶 2 万字符；链接令牌必须出现在该用户本聊天中发过的消息里才允许代读，无权限时引导用户把机器人加为文档协作者。`feishu_web_fetch` 抓取公网网页正文（去标签、512KB 上限、15 秒超时），DNS 解析后拦截内网/环回地址，重定向逐跳复核。FeishuClient 新增 `querySheets` 与 `listBitableTables`。
