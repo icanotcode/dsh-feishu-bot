@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 支持引用回复：飞书的引用回复事件只携带被引用消息的 id，此前 Agent 完全看不到被引内容。现在解析器透传 parent_id/root_id，准入阶段先做本聊天历史库补全（含机器人自己的回复，限 500 字，跨聊天的引用不注入），未命中再走开放平台 getMessage 兜底（机器人上线前的消息），补全失败静默不阻塞主流程。
+
 - 隔离会话新增公网搜索与海报渲染：`feishu_web_search` 经 DuckDuckGo HTML 端点搜索（标题/链接/摘要最多 8 条，uddg 跳转链接还原，复用 SSRF 防护），配合 `feishu_web_fetch` 形成「搜索→选读」闭环；`feishu_poster_render` 用内置三套专业模板（深蓝商务/发布会金句/清新杂志，1080×1500 画布、槽位插值、全量 HTML 转义）或工作区自有 HTML，经 headless chromium 截图为 2 倍率 PNG 写回工作区——渲染环境断网（host-resolver-rules 全屏蔽）、45 秒超时、临时目录即用即清，chromium 路径可用 FEISHU_POSTER_CHROMIUM 覆盖。
 
 - 云文档读取的错误提示区分两类「无权限」：应用未开通 API scope（99991672 且含 scopes is required）现在明确指向「管理员在开放平台开通权限并发布版本」，并回显缺失的 scope 列表；文档级协作权限不足保持原有分享/跨企业引导，避免把 scope 缺失误判为协作或跨租户问题。
