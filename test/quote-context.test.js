@@ -34,11 +34,16 @@ test('引用补全：跨聊天的引用不注入', () => {
   assert.equal(out, '');
 });
 
-test('引用补全：超长引用截断到 500 字', () => {
-  const record = { feishuMessageId: 'om_parent', sessionId: 's1', role: 'user', text: '长'.repeat(600) };
-  const out = quoteFromStore({ chatId: 'oc_test', store: storeWith(record, 'oc_test') }, 'om_parent');
-  assert.ok(out.includes('…'));
-  assert.ok(out.length < 560);
+test('引用补全：2000 字以内全留，超长取头 1500 + 尾 500', () => {
+  const short = { feishuMessageId: 'om_short', sessionId: 's1', role: 'user', text: '短消息'.repeat(100) };
+  const shortOut = quoteFromStore({ chatId: 'oc_test', store: storeWith(short, 'oc_test') }, 'om_short');
+  assert.ok(!shortOut.includes('省略'), '600 字应完整保留');
+
+  const long = { feishuMessageId: 'om_long', sessionId: 's1', role: 'user', text: `头${'中'.repeat(2000)}尾` };
+  const out = quoteFromStore({ chatId: 'oc_test', store: storeWith(long, 'oc_test') }, 'om_long');
+  assert.match(out, /中间省略 2 字/);
+  assert.match(out, /头中+$/m) // 头部保留
+  assert.ok(out.endsWith('尾'), '尾部保留');
 });
 
 test('引用补全：API 兜底解析文本消息，失败静默', async () => {
