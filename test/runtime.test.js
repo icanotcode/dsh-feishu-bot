@@ -96,6 +96,20 @@ test('real tool schemas, claimed session provenance and exactly one automatic re
   assert.deepEqual(app.replies, [['om_test', '最终答复']]);
 });
 
+test('quoted message context reaches the agent under frozen delivery payloads', async t => {
+  const app = await createConversationFixture(t, { tools: feishuTools });
+  await app.send({ text: '第一条消息的内容标记 ALPHA-QUOTE-7', messageId: 'om_quoted' });
+  const agent = [...app.agents.values()][0];
+  await app.claim(agent);
+  await app.finish(agent, '第一个回答');
+  // 生产环境的 webhook 投递是深冻结的；带引用的准入不得在原地修改 parsed
+  await app.send({ text: '接着这条问', messageId: 'om_followup', parentId: 'om_quoted', freeze: true });
+  const latest = agent.queue.at(-1);
+  const text = latest.content.map(part => part.text || '').join('\n');
+  assert.match(text, /ALPHA-QUOTE-7/, '引用内容应注入提示词');
+  assert.ok(!app.replies.some(([, body]) => String(body).includes('消息未能进入会话')), '不应出现准入失败回复');
+});
+
 test('cached tenant token rotates immediately when credential values change', async () => {
   let secret = 'first'; let calls = 0;
   const original = globalThis.fetch;

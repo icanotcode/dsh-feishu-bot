@@ -131,12 +131,21 @@ export async function createConversationFixture(t, options = {}) {
       history: fixture.history, host: fixture.host, now: () => clock, mediaApi: options.mediaApi, mail: options.mail,
     });
   }
-  fixture.send = async ({ text = 'hello', senderId = 'alice', chatId = 'chat-a', messageId, deliveryId, tenantId = 'tenant', timestamp, signal, attachments, attachmentError, msgType, chatType = 'p2p' } = {}) => {
+  // 生产环境的 webhook 投递会深冻结 payload（snapshotJsonValue），准入代码不得原地修改 parsed。
+  const deepFreeze = value => {
+    if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+      for (const key of Reflect.ownKeys(value)) deepFreeze(value[key]);
+      Object.freeze(value);
+    }
+    return value;
+  };
+  fixture.send = async ({ text = 'hello', senderId = 'alice', chatId = 'chat-a', messageId, deliveryId, tenantId = 'tenant', timestamp, signal, attachments, attachmentError, msgType, chatType = 'p2p', parentId, freeze = false } = {}) => {
     messageId ??= `message-${++sequence}`;
     deliveryId ??= `delivery-${messageId}`;
     const prepared = await fixture.dispose.prepareIngress({ userText: text, senderId, chatId, messageId, tenantId, chatType, msgType: msgType || 'text', ...(timestamp ? { timestamp } : {}), ...(attachments ? { attachments } : {}), ...(attachmentError ? { attachmentError } : {}) });
+    const parsed = parentId ? { ...prepared.parsed, parentId } : prepared.parsed;
     await rule.run({ kind: 'feishu', source: config.source, deliveryId, receivedAt: clock,
-      event: { payload: { parsed: prepared.parsed } },
+      event: { payload: { parsed: freeze ? deepFreeze(parsed) : parsed } },
     }, signal ?? new AbortController().signal);
     return { messageId, deliveryId };
   };
