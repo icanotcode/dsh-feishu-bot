@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { parseFeishuMessage } from '../lib/message-parser.js';
 import { quoteFromStore, quoteFromApi } from '../lib/quote-context.js';
 
@@ -108,4 +111,36 @@ test('API 兜底：文本消息正常截断，异常静默', async () => {
   assert.match(out, /历史里的旧消息/);
   const broken = { async getMessage() { throw new Error('network'); } };
   assert.equal(await quoteFromApi(broken, 'om_old'), '');
+});
+
+// ===== 机器人发出的文件（发送记录反查）=====
+
+const SENT_NOTE = '已发送附件：{"sent":true,"messageId":"om_sent_file","path":"SOP-正式版.md","kind":"file","size":7560}';
+
+const storeWithSent = (chatId, noteText = SENT_NOTE) => ({
+  getAnyMessageByFeishuId: () => undefined,
+  getSession: sessionId => ({ sessionId, chatId }),
+  searchMessages: ({ query }) => (query === 'om_sent_file' ? [{ role: 'assistant', text: noteText }] : []),
+});
+
+test('引用机器人发出的文件：发送记录反查路径，文件在则不回拉', async t => {
+  const ws = await mkdtemp(join(tmpdir(), 'quote-sent-'));
+  t.after(() => rm(ws, { recursive: true, force: true }));
+  await writeFile(join(ws, 'SOP-正式版.md'), '内容');
+  const binding = { chatId: 'oc_test', workspacePath: ws, store: storeWithSent('oc_test') };
+  const fetchAttachment = async () => { throw new Error('不应触发回拉'); };
+  const out = await quoteFromStore(binding, 'om_sent_file', { fetchAttachment });
+  assert.match(out, /机器人此前发送的文件/);
+  assert.match(out, /SOP-正式版\.md/);
+  assert.match(out, /feishu_workspace_extract_text/);
+});
+
+test('引用机器人发出的文件：记录还在但文件已删，交给回拉兜底', async t => {
+  const ws = await mkdtemp(join(tmpdir(), 'quote-sent-gone-'));
+  t.after(() => rm(ws, { recursive: true, force: true }));
+  const binding = { chatId: 'oc_test', workspacePath: ws, store: storeWithSent('oc_test') };
+  const out = await quoteFromStore(binding, 'om_sent_file', {
+    fetchAttachment: async () => ({ name: 'SOP-正式版.md', path: 'incoming/xyz/uuid-SOP-正式版.md', kind: 'file' }),
+  });
+  assert.equal(out, '', 'store 路径应让位给 API/回拉流程');
 });
